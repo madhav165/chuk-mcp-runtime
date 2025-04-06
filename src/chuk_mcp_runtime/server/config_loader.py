@@ -13,58 +13,49 @@ from typing import Dict, Any, List, Optional
 # logger
 logger = logging.getLogger("chuk_mcp_runtime.config")
 
-def load_config(config_paths: Optional[List[str]] = None, 
-                default_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """
-    Load server configuration from config files.
-    
-    Args:
-        config_paths: List of paths to search for config files. If None, uses default search paths.
-        default_config: Default configuration to use if no config file is found.
-    
-    Returns:
-        A dictionary containing the configuration settings.
-    """
-    if config_paths is None:
-        # Default search paths relative to current working directory
-        config_paths = [
-            os.path.join(os.getcwd(), "config.yaml"),
-            os.path.join(os.getcwd(), "config.yml"),
-            os.environ.get("CHUK_MCP_CONFIG_PATH", ""),
-        ]
-        
-        # Add config in package directory if run from package
-        package_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        config_paths.append(os.path.join(package_dir, "config.yaml"))
-    
-    # Filter out empty paths
-    config_paths = [p for p in config_paths if p]
-    
-    # Try to load from each path
-    for path in config_paths:
-        if os.path.exists(path):
-            logger.info(f"Loading configuration from {path}")
-            try:
-                with open(path, 'r') as f:
-                    config = yaml.safe_load(f)
-                    if config is None:  # Empty YAML file
-                        continue
-                    return config
-            except Exception as e:
-                logger.warning(f"Error loading config from {path}: {e}")
-    
-    # Use default configuration if provided or create a minimal one
+def load_config(config_paths=None, default_config=None):
     if default_config is None:
-        logger.warning("No configuration file found, using minimal default configuration")
         default_config = {
-            "host": {
-                "name": "generic-mcp-server", 
-                "log_level": "INFO"
+            "host": {"name": "generic-mcp-server", "log_level": "INFO"},
+            "server": {"type": "stdio"},
+            "logging": {
+                "level": "INFO",
+                "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                "reset_handlers": True,
+                "quiet_libraries": True
+            },
+            "tools": {
+                "registry_module": "chuk_mcp_runtime.common.mcp_tool_decorator",
+                "registry_attr": "TOOLS_REGISTRY"
             },
             "mcp_servers": {}
         }
-    else:
-        logger.warning("No configuration file found, using provided default configuration")
+    
+    # If no explicit config_paths provided, look in common locations.
+    if config_paths is None:
+        config_paths = [
+            os.path.join(os.getcwd(), "config.yaml"),
+            os.path.join(os.getcwd(), "config.yml"),
+            os.environ.get("CHUK_MCP_CONFIG_PATH", "")
+        ]
+        package_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        config_paths.append(os.path.join(package_dir, "config.yaml"))
+
+    config_paths = [p for p in config_paths if p]
+
+    for path in config_paths:
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    file_config = yaml.safe_load(f) or {}
+                    # Merge file_config into default_config (shallow merge for now)
+                    default_config.update(file_config)
+                    return default_config
+            except Exception as e:
+                # Log warning but continue trying
+                logging.getLogger("chuk_mcp_runtime.config").warning(
+                    f"Error loading config from {path}: {e}"
+                )
     
     return default_config
 

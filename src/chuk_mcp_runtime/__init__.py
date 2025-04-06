@@ -8,4 +8,4 @@ This package provides a runtime for CHUK MCP (Messaging Control Protocol) server
 __version__ = "0.1.0"
 
 # Import main functions for convenience
-from chuk_mcp_runtime.main import run_server, main
+from chuk_mcp_runtime.entry import run_runtime, main
