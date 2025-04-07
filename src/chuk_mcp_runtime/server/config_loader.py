@@ -6,12 +6,21 @@ This module provides functionality to load and manage
 configuration files for CHUK MCP servers from multiple potential locations.
 """
 import os
+import sys
 import yaml
 import logging
 from typing import Dict, Any, List, Optional
 
-# logger
+# Configure logger to log to stderr
 logger = logging.getLogger("chuk_mcp_runtime.config")
+logger.setLevel(logging.INFO)  # Set default logging level
+
+# Create a StreamHandler that logs to stderr
+stderr_handler = logging.StreamHandler(sys.stderr)
+stderr_handler.setLevel(logging.INFO)
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+stderr_handler.setFormatter(formatter)
+logger.addHandler(stderr_handler)
 
 def load_config(config_paths=None, default_config=None):
     if default_config is None:
@@ -53,9 +62,7 @@ def load_config(config_paths=None, default_config=None):
                     return default_config
             except Exception as e:
                 # Log warning but continue trying
-                logging.getLogger("chuk_mcp_runtime.config").warning(
-                    f"Error loading config from {path}: {e}"
-                )
+                logger.warning(f"Error loading config from {path}: {e}")
     
     return default_config
 
@@ -95,7 +102,7 @@ def find_project_root(start_dir: Optional[str] = None) -> str:
         current_dir = parent_dir
         depth += 1
     
-    # If no project root found, return the starting directory
+    # If no project root found, log a warning and return the starting directory
     logger.warning(f"No project root markers found, using {start_dir} as project root")
     return os.path.abspath(start_dir)
 

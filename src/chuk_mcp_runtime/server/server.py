@@ -69,7 +69,7 @@ class MCPServer:
             self.logger.warning("No tools available")
         else:
             self.logger.info(f"Loaded {len(tools_registry)} tools")
-            self.logger.debug(f"Available tools: {', '.join(tools_registry.keys())}")
+            self.logger.info(f"Available tools: {', '.join(tools_registry.keys())}")
         
         return tools_registry
     
@@ -124,7 +124,7 @@ class MCPServer:
             
             func = self.tools_registry[name]
             try:
-                self.logger.info(f"Executing tool '{name}' with arguments: {arguments}")
+                self.logger.debug(f"Executing tool '{name}' with arguments: {arguments}")
                 result = func(**arguments)
                 
                 # If result is already a list of content objects, return as is
@@ -146,7 +146,7 @@ class MCPServer:
         # Add custom handlers if provided
         if custom_handlers:
             for handler_name, handler_func in custom_handlers.items():
-                self.logger.info(f"Adding custom handler: {handler_name}")
+                self.logger.debug(f"Adding custom handler: {handler_name}")
                 setattr(server, handler_name, handler_func)
 
         # Create initialization options
