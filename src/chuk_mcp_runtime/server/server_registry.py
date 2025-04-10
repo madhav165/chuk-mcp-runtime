@@ -5,12 +5,12 @@ Server Registry Module for CHUK MCP Tool Servers
 This module provides a ServerRegistry class for managing 
 CHUK MCP tool servers and their components.
 """
-
 import os
 import sys
 import importlib
 from typing import List, Dict, Any, Tuple, Optional
 
+# get the logger
 from chuk_mcp_runtime.server.logging_config import get_logger
 
 class ServerRegistry:

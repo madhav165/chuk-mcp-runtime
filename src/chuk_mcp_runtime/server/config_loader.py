@@ -13,11 +13,9 @@ from typing import Dict, Any, List, Optional
 
 # Configure logger to log to stderr
 logger = logging.getLogger("chuk_mcp_runtime.config")
-logger.setLevel(logging.INFO)  # Set default logging level
 
 # Create a StreamHandler that logs to stderr
 stderr_handler = logging.StreamHandler(sys.stderr)
-stderr_handler.setLevel(logging.INFO)
 formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 stderr_handler.setFormatter(formatter)
 logger.addHandler(stderr_handler)

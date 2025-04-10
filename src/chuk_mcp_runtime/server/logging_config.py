@@ -80,6 +80,7 @@ def get_logger(name: str = None, config: Dict[str, Any] = None) -> Logger:
     # Get logger
     logger = logging.getLogger(name)
     
+    # return the logger
     return logger
 
 # Create a default logger for the module
