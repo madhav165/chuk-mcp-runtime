@@ -1,4 +1,3 @@
-# chuk_mcp_runtime/server/logging_config.py
 """
 Logging configuration module for CHUK MCP servers.
 
@@ -36,7 +35,8 @@ def configure_logging(config: Dict[str, Any] = None) -> None:
     
     # Add handlers if none exist
     if not root_logger.handlers:
-        handler = logging.StreamHandler(sys.stdout)
+        # Send logs to stderr instead of stdout.
+        handler = logging.StreamHandler(sys.stderr)
         
         # Set formatter
         log_format = log_config.get("format", 
