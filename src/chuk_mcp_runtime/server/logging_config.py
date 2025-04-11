@@ -50,6 +50,9 @@ def configure_logging(config: Dict[str, Any] = None) -> None:
     if log_config.get("quiet_libraries", True):
         for lib in ["urllib3", "requests", "asyncio"]:
             logging.getLogger(lib).setLevel(logging.WARNING)
+    
+    # Quiet the specific library logging for mcp.server.lowlevel.server
+    logging.getLogger("mcp.server.lowlevel.server").setLevel(logging.WARNING)
 
 def get_logger(name: str = None, config: Dict[str, Any] = None) -> Logger:
     """
