@@ -18,7 +18,7 @@ async def run_runtime(config_paths=None, default_config=None, bootstrap_componen
     project_root = find_project_root()
 
     if bootstrap_components and not os.getenv("NO_BOOTSTRAP"):
-        logger.info("Bootstrapping components...")
+        logger.debug("Bootstrapping components...")
         registry = ServerRegistry(project_root, config)
         registry.load_server_components()
 

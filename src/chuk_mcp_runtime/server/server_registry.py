@@ -84,8 +84,8 @@ class ServerRegistry:
         core_servers = [name for name in server_paths.keys() if name in core_paths]
         mcp_servers_list = [name for name in server_paths.keys() if name not in core_paths]
         
-        self.logger.info(f"Core paths: {', '.join(core_servers) if core_servers else 'None'}")
-        self.logger.info(f"MCP servers: {', '.join(mcp_servers_list) if mcp_servers_list else 'None'}")
+        self.logger.debug(f"Core paths: {', '.join(core_servers) if core_servers else 'None'}")
+        self.logger.debug(f"MCP servers: {', '.join(mcp_servers_list) if mcp_servers_list else 'None'}")
         
         return server_paths, components
     
@@ -173,7 +173,7 @@ class ServerRegistry:
                 
                 # For testing, always try to import the module
                 try:
-                    self.logger.info(f"Loading {component_type} from {module_name}" + 
+                    self.logger.debug(f"Loading {component_type} from {module_name}" + 
                                    (" (auto-discovered)" if auto_discovered else ""))
                     self.loaded_modules[module_name] = importlib.import_module(module_name)
                 except ImportError as e:

@@ -68,8 +68,8 @@ class MCPServer:
         if not tools_registry:
             self.logger.warning("No tools available")
         else:
-            self.logger.info(f"Loaded {len(tools_registry)} tools")
-            self.logger.info(f"Available tools: {', '.join(tools_registry.keys())}")
+            self.logger.debug(f"Loaded {len(tools_registry)} tools")
+            self.logger.debug(f"Available tools: {', '.join(tools_registry.keys())}")
         
         return tools_registry
     
@@ -156,14 +156,14 @@ class MCPServer:
         server_type = self.config.get("server", {}).get("type", "stdio")
         
         if server_type == "stdio":
-            self.logger.info("Starting stdio server")
+            self.logger.debug("Starting stdio server")
             async with stdio_server() as (read_stream, write_stream):
                 await server.run(read_stream, write_stream, options)
         elif server_type == "websocket":
             # Example for websocket server - replace with actual implementation
             ws_host = self.config.get("server", {}).get("host", "localhost")
             ws_port = self.config.get("server", {}).get("port", 8080)
-            self.logger.info(f"Starting WebSocket server on {ws_host}:{ws_port}")
+            self.logger.debug(f"Starting WebSocket server on {ws_host}:{ws_port}")
             # Implement WebSocket server here
             raise NotImplementedError("WebSocket server not implemented yet")
         else:
@@ -182,7 +182,7 @@ class MCPServer:
             return
             
         self.tools_registry[name] = func
-        self.logger.info(f"Registered tool: {name}")
+        self.logger.debug(f"Registered tool: {name}")
         
     def get_tool_names(self) -> List[str]:
         """
