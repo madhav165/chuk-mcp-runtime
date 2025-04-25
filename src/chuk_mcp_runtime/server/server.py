@@ -7,6 +7,7 @@ running tools and managing server operations.
 """
 import asyncio
 import json
+import inspect
 import importlib
 from typing import Dict, Any, List, Optional, Union, Callable
 
@@ -18,13 +19,18 @@ from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource
 # Local imports
 from chuk_mcp_runtime.server.logging_config import get_logger
 
+
 class MCPServer:
     """
     Manages the MCP (Messaging Control Protocol) server operations.
     
     Handles tool discovery, registration, and execution.
     """
-    def __init__(self, config: Dict[str, Any], tools_registry: Optional[Dict[str, Callable]] = None):
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        tools_registry: Optional[Dict[str, Callable]] = None
+    ):
         """
         Initialize the MCP server.
         
@@ -50,19 +56,26 @@ class MCPServer:
         Returns:
             Dictionary of available tools.
         """
-        # Get registry module path from config
-        registry_module_path = self.config.get("tools", {}).get(
-            "registry_module", "chuk_mcp_runtime.common.mcp_tool_decorator"
+        registry_module_path = self.config.get(
+            "tools", {}
+        ).get(
+            "registry_module",
+            "chuk_mcp_runtime.common.mcp_tool_decorator"
         )
-        registry_attr = self.config.get("tools", {}).get(
-            "registry_attr", "TOOLS_REGISTRY"
+        registry_attr = self.config.get(
+            "tools", {}
+        ).get(
+            "registry_attr",
+            "TOOLS_REGISTRY"
         )
         
         try:
             tools_decorator_module = importlib.import_module(registry_module_path)
             tools_registry = getattr(tools_decorator_module, registry_attr, {})
         except (ImportError, AttributeError) as e:
-            self.logger.error(f"Failed to import TOOLS_REGISTRY from {registry_module_path}: {e}")
+            self.logger.error(
+                f"Failed to import TOOLS_REGISTRY from {registry_module_path}: {e}"
+            )
             tools_registry = {}
         
         if not tools_registry:
@@ -82,7 +95,6 @@ class MCPServer:
         Args:
             custom_handlers: Optional dictionary of custom handlers to add to the server.
         """
-        # Create MCP server instance
         server = Server(self.server_name)
 
         @server.list_tools()
@@ -105,7 +117,10 @@ class MCPServer:
             return tool_list
 
         @server.call_tool()
-        async def call_tool(name: str, arguments: Dict[str, Any]) -> List[Union[TextContent, ImageContent, EmbeddedResource]]:
+        async def call_tool(
+            name: str,
+            arguments: Dict[str, Any]
+        ) -> List[Union[TextContent, ImageContent, EmbeddedResource]]:
             """
             Execute a specific tool with given arguments.
             
@@ -125,34 +140,48 @@ class MCPServer:
             func = self.tools_registry[name]
             try:
                 self.logger.debug(f"Executing tool '{name}' with arguments: {arguments}")
+                
+                # Call the tool; it may return a coroutine
                 result = func(**arguments)
+                # If it returned an awaitable (coroutine), await it
+                if inspect.isawaitable(result):
+                    result = await result
                 
                 # If result is already a list of content objects, return as is
-                if isinstance(result, list) and all(isinstance(item, (TextContent, ImageContent, EmbeddedResource)) 
-                                                for item in result):
+                if (
+                    isinstance(result, list)
+                    and all(
+                        isinstance(item, (TextContent, ImageContent, EmbeddedResource))
+                        for item in result
+                    )
+                ):
                     return result
                 
-                # For simple text results, wrap in TextContent
+                # If it's a simple string, wrap in TextContent
                 if isinstance(result, str):
                     return [TextContent(type="text", text=result)]
                 
-                # Otherwise, serialize to JSON
-                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+                # Otherwise, serialize to JSON and wrap
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(result, indent=2)
+                    )
+                ]
                 
             except Exception as e:
-                self.logger.error(f"Error processing tool '{name}': {e}", exc_info=True)
+                self.logger.error(
+                    f"Error processing tool '{name}': {e}", exc_info=True
+                )
                 raise ValueError(f"Error processing tool '{name}': {str(e)}")
         
-        # Add custom handlers if provided
+        # Add any custom handlers
         if custom_handlers:
             for handler_name, handler_func in custom_handlers.items():
                 self.logger.debug(f"Adding custom handler: {handler_name}")
                 setattr(server, handler_name, handler_func)
 
-        # Create initialization options
         options = server.create_initialization_options()
-        
-        # Run server based on configuration
         server_type = self.config.get("server", {}).get("type", "stdio")
         
         if server_type == "stdio":
@@ -160,11 +189,9 @@ class MCPServer:
             async with stdio_server() as (read_stream, write_stream):
                 await server.run(read_stream, write_stream, options)
         elif server_type == "websocket":
-            # Example for websocket server - replace with actual implementation
             ws_host = self.config.get("server", {}).get("host", "localhost")
             ws_port = self.config.get("server", {}).get("port", 8080)
             self.logger.debug(f"Starting WebSocket server on {ws_host}:{ws_port}")
-            # Implement WebSocket server here
             raise NotImplementedError("WebSocket server not implemented yet")
         else:
             raise ValueError(f"Unknown server type: {server_type}")
@@ -178,7 +205,7 @@ class MCPServer:
             func: Function to register.
         """
         if not hasattr(func, '_mcp_tool'):
-            self.logger.warning(f"Function {func.__name__} does not have _mcp_tool attribute")
+            self.logger.warning(f"Function {func.__name__} lacks _mcp_tool metadata")
             return
             
         self.tools_registry[name] = func
