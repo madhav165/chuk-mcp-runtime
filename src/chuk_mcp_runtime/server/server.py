@@ -1,4 +1,4 @@
-# chuk_mcp_runtime/server/server.py
+# -*- coding: utf-8 -*-
 """
 CHUK MCP Server Module
 
@@ -109,12 +109,11 @@ class MCPServer:
                 self.logger.warning("No tools available")
                 return []
             
-            tool_list = []
-            for func in self.tools_registry.values():
-                if hasattr(func, '_mcp_tool'):
-                    tool_list.append(func._mcp_tool)
-            
-            return tool_list
+            return [
+                func._mcp_tool
+                for func in self.tools_registry.values()
+                if hasattr(func, '_mcp_tool')
+            ]
 
         @server.call_tool()
         async def call_tool(
@@ -141,13 +140,14 @@ class MCPServer:
             try:
                 self.logger.debug(f"Executing tool '{name}' with arguments: {arguments}")
                 
-                # Call the tool; it may return a coroutine
+                # 1) Call the tool; it may return a coroutine
                 result = func(**arguments)
-                # If it returned an awaitable (coroutine), await it
+                
+                # 2) If it's awaitable (a coroutine), await it here
                 if inspect.isawaitable(result):
                     result = await result
                 
-                # If result is already a list of content objects, return as is
+                # 3) If result is already content objects, return as is
                 if (
                     isinstance(result, list)
                     and all(
@@ -157,11 +157,11 @@ class MCPServer:
                 ):
                     return result
                 
-                # If it's a simple string, wrap in TextContent
+                # 4) If it's a simple string, wrap in TextContent
                 if isinstance(result, str):
                     return [TextContent(type="text", text=result)]
                 
-                # Otherwise, serialize to JSON and wrap
+                # 5) Otherwise, serialize to JSON and wrap
                 return [
                     TextContent(
                         type="text",
