@@ -21,6 +21,8 @@ dependencies = [
     "mcp>=1.6.0",
     "pydantic>=2.10.6",
     "pyyaml>=6.0.2",
+    "starlette>=0.46.1",
+    "uvicorn>=0.34.0",
 ]
 
 [project.optional-dependencies]

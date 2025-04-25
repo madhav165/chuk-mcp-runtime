@@ -1,21 +1,8 @@
-# Example CHUK MCP Server Configuration
-# Host configuration
-host:
-  name: "chuk-example-mcp-server"
-  log_level: "INFO"
-
-# Server configuration
+# examples/simple_server/config.yaml
 server:
-  type: "stdio"  # stdio, websocket
+  type: sse
 
-# Logging configuration
-logging:
-  level: "INFO"
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  reset_handlers: true
-  quiet_libraries: true
-
-# Tools configuration
-tools:
-  registry_module: "chuk_mcp_runtime.common.mcp_tool_decorator"
-  registry_attr: "TOOLS_REGISTRY"
+  # optional overrides
+  sse:
+    host: 127.0.0.1
+    port: 8080
