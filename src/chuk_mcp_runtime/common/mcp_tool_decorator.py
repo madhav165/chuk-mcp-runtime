@@ -7,9 +7,9 @@ with automatic input schema generation based on function signatures.
 Supports both synchronous and asynchronous functions.
 """
 import inspect
-from functools import wraps
-from typing import Any, Awaitable, Callable, Dict, Type, TypeVar, get_type_hints
 import asyncio
+from functools import wraps
+from typing import Any, Callable, Dict, Type, TypeVar, get_type_hints
 import logging
 
 T = TypeVar("T")
@@ -34,7 +34,7 @@ except ImportError:
             self.description = description
             self.inputSchema = inputSchema
 
-# Global registry of tool functions
+# Global registry of tool functions (always the async wrapper)
 TOOLS_REGISTRY: Dict[str, Callable[..., Any]] = {}
 
 def _get_type_schema(annotation: Type) -> Dict[str, Any]:
@@ -54,7 +54,7 @@ def _get_type_schema(annotation: Type) -> Dict[str, Any]:
         return {"type": "object"}
     return {"type": "string"}
 
-def create_input_schema(func: Callable) -> Dict[str, Any]:
+def create_input_schema(func: Callable[..., Any]) -> Dict[str, Any]:
     """
     Build a JSON Schema for the parameters of `func`, using Pydantic if available.
     """
@@ -83,21 +83,17 @@ def create_input_schema(func: Callable) -> Dict[str, Any]:
 
 def mcp_tool(name: str = None, description: str = None):
     """
-    Decorator to register a tool.  Works with both sync and async functions.
+    Decorator to register a tool. Works with both sync and async functions.
     """
     def decorator(func: Callable[..., Any]):
         tool_name = name or func.__name__
         tool_desc = description or (func.__doc__ or "").strip() or f"Tool: {tool_name}"
 
-        # Build input schema and Tool metadata
+        # Build input schema and metadata
         schema = create_input_schema(func)
         tool = Tool(name=tool_name, description=tool_desc, inputSchema=schema)
 
-        # Register
-        TOOLS_REGISTRY[tool_name] = func
-        func._mcp_tool = tool  # attach metadata
-
-        # Wrap so every tool becomes async
+        # Create an async wrapper for this tool
         if inspect.iscoroutinefunction(func):
             @wraps(func)
             async def wrapper(*args, **kwargs):
@@ -107,9 +103,24 @@ def mcp_tool(name: str = None, description: str = None):
             async def wrapper(*args, **kwargs):
                 return func(*args, **kwargs)
 
-        # Preserve sync interface if needed
-        wrapper.sync = lambda *a, **kw: asyncio.get_event_loop().run_until_complete(wrapper(*a, **kw))
-        return wrapper
+        # Attach metadata on the wrapper
+        wrapper._mcp_tool = tool  # type: ignore
+        # Provide a sync helper
+        def sync_helper(*args, **kwargs):
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                new_loop = asyncio.new_event_loop()
+                try:
+                    return new_loop.run_until_complete(wrapper(*args, **kwargs))
+                finally:
+                    new_loop.close()
+            else:
+                return loop.run_until_complete(wrapper(*args, **kwargs))
+        wrapper.sync = sync_helper  # type: ignore
+
+        # Register the wrapper, not the original func
+        TOOLS_REGISTRY[tool_name] = wrapper
+        return wrapper  # always async
 
     return decorator
 
@@ -120,7 +131,6 @@ async def execute_tool_async(tool_name: str, **kwargs) -> Any:
     if tool_name not in TOOLS_REGISTRY:
         raise KeyError(f"Tool '{tool_name}' not registered")
     fn = TOOLS_REGISTRY[tool_name]
-    # fn is now always async (wrapped above)
     return await fn(**kwargs)
 
 def execute_tool(tool_name: str, **kwargs) -> Any:
@@ -130,14 +140,4 @@ def execute_tool(tool_name: str, **kwargs) -> Any:
     if tool_name not in TOOLS_REGISTRY:
         raise KeyError(f"Tool '{tool_name}' not registered")
     fn = TOOLS_REGISTRY[tool_name]
-    # Synchronously block on the async wrapper
-    loop = asyncio.get_event_loop()
-    if loop.is_running():
-        # If called inside an existing loop, spawn a fresh one
-        new_loop = asyncio.new_event_loop()
-        try:
-            return new_loop.run_until_complete(fn(**kwargs))
-        finally:
-            new_loop.close()
-    else:
-        return loop.run_until_complete(fn(**kwargs))
+    return fn.sync(**kwargs)
