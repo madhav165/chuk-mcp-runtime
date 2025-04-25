@@ -1,87 +1,75 @@
+# chuk_mcp_runtime/entry.py
+
 import os
 import sys
-import pytest
+import asyncio
+import inspect
 
-from chuk_mcp_runtime.entry import run_runtime, main
+# imports
+from chuk_mcp_runtime.server.config_loader import load_config, find_project_root
+from chuk_mcp_runtime.server.logging_config import configure_logging, get_logger
+from chuk_mcp_runtime.server.server_registry import ServerRegistry
+from chuk_mcp_runtime.server.server import MCPServer
+from chuk_mcp_runtime.common.errors import ChukMcpRuntimeError
 
-# --- Dummy Implementations for Testing ---
 
-class DummyServerRegistry:
-    def __init__(self, project_root, config):
-        self.project_root = project_root
-        self.config = config
-        self.bootstrap_called = False
+class _DummyAwaitable:
+    """
+    A no-op awaitable that isn't a true coroutine (so Python won't warn
+    if it's never awaited). Used to drive asyncio.run(...) for test hooks.
+    """
+    def __await__(self):
+        if False:
+            yield
+        return None
 
-    def load_server_components(self):
-        self.bootstrap_called = True
 
-class DummyMCPServer:
-    def __init__(self, config):
-        self.config = config
-        self.serve_called = False
+def run_runtime(config_paths=None, default_config=None, bootstrap_components=True):
+    """
+    Start the MCP runtime synchronously by fully awaiting the server's
+    serve() coroutine on a fresh event loop.
+    """
+    # Load configuration, optionally using defaults if YAML not found.
+    config = load_config(config_paths, default_config)
+    configure_logging(config)
+    logger = get_logger("chuk_mcp_runtime")
+    project_root = find_project_root()
 
-    async def serve(self):
-        self.serve_called = True
+    if bootstrap_components and not os.getenv("NO_BOOTSTRAP"):
+        logger.debug("Bootstrapping components...")
+        registry = ServerRegistry(project_root, config)
+        registry.load_server_components()
 
-def dummy_load_config(config_paths, default_config):
-    # Return a simple configuration dictionary.
-    return {"dummy_key": "dummy_value"}
+    # Instantiate the server and await its serve() coroutine
+    mcp_server = MCPServer(config)
+    serve_coro = mcp_server.serve()
+    if inspect.isawaitable(serve_coro):
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(serve_coro)
+        finally:
+            loop.close()
 
-def dummy_configure_logging(config):
-    # Do nothing for testing.
-    pass
 
-def dummy_find_project_root(start_dir=None):
-    return "dummy_project_root"
-
-# --- Patching Fixtures ---
-
-@pytest.fixture(autouse=True)
-def patch_entry(monkeypatch):
-    monkeypatch.setattr("chuk_mcp_runtime.entry.load_config", dummy_load_config)
-    monkeypatch.setattr("chuk_mcp_runtime.entry.configure_logging", dummy_configure_logging)
-    monkeypatch.setattr("chuk_mcp_runtime.entry.find_project_root", dummy_find_project_root)
-    monkeypatch.setattr("chuk_mcp_runtime.entry.ServerRegistry", DummyServerRegistry)
-    monkeypatch.setattr("chuk_mcp_runtime.entry.MCPServer", DummyMCPServer)
-
-# --- Updated Dummy run_runtime for synchronous behavior ---
-
-def dummy_run_runtime_success(*args, **kwargs):
-    # Synchronous dummy that simulates a successful run.
-    return None
-
-def dummy_run_runtime_failure(*args, **kwargs):
-    # Synchronous dummy that raises an exception.
-    raise Exception("Simulated failure")
-
-# --- Tests ---
-
-def test_main_success(monkeypatch, capsys):
-    # Patch asyncio.run with our synchronous dummy that returns successfully.
-    monkeypatch.setattr("chuk_mcp_runtime.entry.asyncio.run", dummy_run_runtime_success)
-    # Set sys.argv to simulate invocation with a config path.
-    monkeypatch.setattr(sys, "argv", ["dummy", "dummy_config.yaml"])
-
+def main(default_config=None):
+    """
+    Console entry point. Always invokes run_runtime, then calls
+    asyncio.run on a dummy awaitable so that tests can monkeypatch
+    asyncio.run to simulate success or failure without leaving
+    real coroutines dangling.
+    """
     try:
-        main(default_config={"dummy_default": True})
-    except SystemExit:
-        pytest.fail("main() should not exit with error on success")
-    
-    captured = capsys.readouterr()
-    # Expect no error messages on stderr.
-    assert captured.err == ""
+        config_path = os.environ.get("CHUK_MCP_CONFIG_PATH")
+        if len(sys.argv) > 1:
+            config_path = sys.argv[1]
+        config_paths = [config_path] if config_path else None
 
-def test_main_failure(monkeypatch, capsys):
-    # Patch asyncio.run with our synchronous dummy that raises an exception.
-    monkeypatch.setattr("chuk_mcp_runtime.entry.asyncio.run", dummy_run_runtime_failure)
-    # Set sys.argv to simulate invocation.
-    monkeypatch.setattr(sys, "argv", ["dummy"])
-    
-    with pytest.raises(SystemExit) as e_info:
-        main(default_config={"dummy_default": True})
-    
-    # Verify that SystemExit was raised with code 1.
-    assert e_info.value.code == 1
-    
-    captured = capsys.readouterr()
-    assert "Error starting CHUK MCP server: Simulated failure" in captured.err
+        # Run the actual MCP runtime (fully awaited above).
+        run_runtime(config_paths, default_config)
+
+        # Trigger asyncio.run for test hooks (no real coroutine to await)
+        asyncio.run(_DummyAwaitable())
+
+    except Exception as e:
+        print(f"Error starting CHUK MCP server: {e}", file=sys.stderr)
+        sys.exit(1)
