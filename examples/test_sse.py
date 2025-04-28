@@ -153,7 +153,7 @@ async def run_test(host: str, port: int, sse_path: str, msg_path: str, tool_name
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Test CHUK MCP SSE Server")
-    parser.add_argument("--host", default="127.0.0.1", help="Server host")
+    parser.add_argument("--host", default="0.0.0.0", help="Server host")
     parser.add_argument("--port", type=int, default=8000, help="Server port")
     parser.add_argument("--sse-path", default="/sse", help="SSE endpoint path")
     parser.add_argument("--msg-path", default="/messages", help="Messages endpoint path")
