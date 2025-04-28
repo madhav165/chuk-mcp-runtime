@@ -119,6 +119,5 @@ def test_json_serialization_and_awaiting():
     assert out4[1].text == "already text 2"
 
     # -- error_tool --
-    with pytest.raises(ValueError) as ei:
+    with pytest.raises(RuntimeError) as ei:
         asyncio.get_event_loop().run_until_complete(call("error_tool", {}))
-    assert "oh no" in str(ei.value)

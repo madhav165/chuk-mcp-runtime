@@ -85,6 +85,8 @@ class MCPServer:
     # Main entry                                                         #
     # ------------------------------------------------------------------ #
     async def serve(self, custom_handlers: Optional[Dict[str, Callable]] = None) -> None:
+        import json
+        
         server = Server(self.server_name)
 
         # ------------ list_tools --------------------------------------
