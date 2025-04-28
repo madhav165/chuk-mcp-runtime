@@ -4,5 +4,9 @@ server:
 
   # optional overrides
   sse:
-    host: 127.0.0.1
-    port: 8080
+    host: "127.0.0.1"
+    port: 8000
+    sse_path: "/sse"
+    message_path: "/messages"
+    log_level: "info"
+    access_log: false

@@ -1,90 +1,62 @@
 # examples/simple_server/main.py
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 """
-Example MCP Server Implementation
+Simple CHUK MCP Server Example
+==============================
 
-This demonstrates how to use the MCP runtime to create a simple server.
+This example demonstrates how to create a simple CHUK MCP server
+with an "echo" tool and expose it over SSE.
 """
+import logging
 import os
 import sys
-import asyncio
-from typing import Dict, Any, List
+from typing import Dict, Any
 
-# Add the parent directory to sys.path to import chuk_mcp_runtime
-parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if parent_dir not in sys.path:
-    sys.path.insert(0, parent_dir)
+# Add the project root to the Python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from chuk_mcp_runtime.server.config_loader import load_config
-from chuk_mcp_runtime.server.logging_config import configure_logging, get_logger
+# Import the CHUK MCP runtime
 from chuk_mcp_runtime.common.mcp_tool_decorator import mcp_tool
-from chuk_mcp_runtime.server.server import MCPServer
+from chuk_mcp_runtime.entry import run_runtime
 
-# Define a simple tool using the decorator
-@mcp_tool(name="echo", description="Echo back the input message")
-def echo_tool(message: str) -> Dict[str, Any]:
-    """
-    Echo back the input message.
-    
-    Args:
-        message: The message to echo.
-        
-    Returns:
-        Dictionary with the echoed message.
-    """
-    return {"echo": message}
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("chuk_mcp_runtime.chuk_example_server")
 
-@mcp_tool(name="add", description="Add two numbers")
-def add_tool(a: int, b: int) -> Dict[str, Any]:
-    """
-    Add two numbers.
-    
-    Args:
-        a: First number.
-        b: Second number.
-        
-    Returns:
-        Dictionary with the sum.
-    """
-    return {"sum": a + b}
+# Define a simple echo tool
+@mcp_tool(name="echo", description="Echo the input message back to the sender")
+def echo_tool(message: str = "Hello world!") -> str:
+    """Echo the input message back to the sender."""
+    logger.info(f"Echo tool received: {message}")
+    return f"You said: {message}"
 
-@mcp_tool(name="greet", description="Generate a greeting message")
-def greet_tool(name: str, formal: bool = False) -> str:
-    """
-    Generate a greeting message.
-    
-    Args:
-        name: Name to greet.
-        formal: Whether to use a formal greeting.
-        
-    Returns:
-        Greeting message.
-    """
-    if formal:
-        return f"Good day, {name}. It is a pleasure to meet you."
-    else:
-        return f"Hey {name}! How's it going?"
-
-async def main():
-    """Run the example server."""
-    # Load configuration
-    config_file = os.path.join(os.path.dirname(__file__), "config.yaml")
-    config = load_config([config_file])
-    
-    # Configure logging
-    configure_logging(config)
-    logger = get_logger("chuk_example_server")
-    
-    # Create a tools registry with our defined tools
-    tools_registry = {
-        "echo": echo_tool,
-        "add": add_tool,
-        "greet": greet_tool
+# Configuration for the server
+config: Dict[str, Any] = {
+    "host": {
+        "name": "chuk-example-server",
+        "log_level": "INFO"
+    },
+    "server": {
+        "type": "sse"  # Use SSE server instead of stdio
+    },
+    "sse": {
+        "host": "127.0.0.1",
+        "port": 8000,
+        "sse_path": "/sse",
+        "message_path": "/messages",
+        "log_level": "info"
+    },
+    "logging": {
+        "level": "INFO",
+        "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        "reset_handlers": True
     }
-    
-    # Initialize and run the server
-    logger.info("Starting example CHUK MCP server")
-    server = MCPServer(config, tools_registry=tools_registry)
-    await server.serve()
+}
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    logger.info("Starting example CHUK MCP server")
+    run_runtime(default_config=config, bootstrap_components=False)

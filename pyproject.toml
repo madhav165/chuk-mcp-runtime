@@ -49,4 +49,5 @@ python_functions = "test_*"
 dev = [
     "pytest-asyncio>=0.26.0",
     "pytest>=8.3.5",
+    "sseclient>=0.0.27",
 ]
