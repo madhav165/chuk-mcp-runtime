@@ -170,11 +170,15 @@ class MCPServer:
             # Create the SSE transport instance
             sse_transport = SseServerTransport(msg_path)
             
-            async def handle_sse(request: Request):
-                # async with sse_transport.connect_sse(request.scope, request.receive, request._send) as streams:
-                    # await server.run(streams[0], streams[1], options)
-
-                if request.scope["type"] != "http":
+            # async def handle_sse(request: Request):
+            #     async with sse_transport.connect_sse(request.scope, request.receive, request._send) as streams:
+            #         await server.run(streams[0], streams[1], options)
+                
+            #     # # Return empty response to avoid NoneType error
+            #     return Response()
+            
+            async def handle_sse(scope, receive, send):
+                if scope["type"] != "http":
                     print("connect_sse received non-HTTP request")
                     raise ValueError("connect_sse can only handle HTTP requests")
 
@@ -190,7 +194,7 @@ class MCPServer:
 
                 # Get session_id from query params
                 session_id = None
-                query_string = request.scope.get("query_string", b"").decode("utf-8")
+                query_string = scope.get("query_string", b"").decode("utf-8")
                 if query_string:
                     for param in query_string.split('&'):
                         if '=' in param:
@@ -233,24 +237,68 @@ class MCPServer:
                         content=sse_stream_reader, data_sender_callable=sse_writer
                     )
                     print("Starting SSE response task")
-                    tg.start_soon(response, request.scope, request.receive, request._send)
+                    tg.start_soon(response, scope, receive, send)
 
                     await server.run(read_stream, write_stream, options)
-                # Return empty response to avoid NoneType error
+                
+                # # Return empty response to avoid NoneType error
 
                 return Response()
             
+            # routes = [
+            #     Route(sse_path, endpoint=handle_sse, methods=["GET"]),
+            #     Mount(msg_path, app=sse_transport.handle_post_message),
+            # ]
+            
+            # starlette_app = Starlette(routes=routes)
+            
+            # # uvicorn.run(starlette_app, host="0.0.0.0", port=port)
+            # config = uvicorn.Config(starlette_app, host=host, port=port, log_level="info")
+            # uvicorn_server = uvicorn.Server(config)
+            # await uvicorn_server.serve()
+
+            # Function to handle 404 errors
+            async def not_found(scope, receive, send):
+                response = PlainTextResponse("Not Found", status_code=404)
+                await response(scope, receive, send)
+            
+            # Create app with routes
             routes = [
                 Route(sse_path, endpoint=handle_sse, methods=["GET"]),
-                Mount(msg_path, app=sse_transport.handle_post_message),
+                Route(msg_path, endpoint=sse_transport.handle_post_message, methods=["POST"]),
             ]
             
-            starlette_app = Starlette(routes=routes)
+            # Create an ASGI app that routes based on the path
+            async def app(scope, receive, send):
+                if scope["type"] == "http":
+                    path = scope["path"]
+                    method = scope["method"]
+                    
+                    # Route to the correct handler
+                    if path == sse_path and method == "GET":
+                        await handle_sse(scope, receive, send)
+                    elif path == msg_path and method == "POST":
+                        await sse_transport.handle_post_message(scope, receive, send)
+                    else:
+                        await not_found(scope, receive, send)
+                else:
+                    # Not an HTTP request
+                    await not_found(scope, receive, send)
             
-            # uvicorn.run(starlette_app, host="0.0.0.0", port=port)
-            config = uvicorn.Config(starlette_app, host=host, port=port, log_level="info")
-            uvicorn_server = uvicorn.Server(config)
-            await uvicorn_server.serve()
+            # Start the uvicorn server
+            self.logger.info(f"Starting SSE server at http://{host}:{port} "
+                             f"(SSE: {sse_path}, Messages: {msg_path})")
+            
+            config = uvicorn.Config(
+                app=app,
+                host=host,
+                port=port,
+                log_level=sse_config.get("log_level", "info").lower(),
+                access_log=sse_config.get("access_log", False),
+            )
+            
+            server_instance = uvicorn.Server(config)
+            await server_instance.serve()
         else:
             raise ValueError(f"Unknown server type: {srv_type!r}")
 
