@@ -170,6 +170,13 @@ class MCPServer:
             # Create the SSE transport instance
             sse_transport = SseServerTransport(msg_path)
             
+            # async def handle_sse(request: Request):
+            #     async with sse_transport.connect_sse(request.scope, request.receive, request._send) as streams:
+            #         await server.run(streams[0], streams[1], options)
+                
+            #     # # Return empty response to avoid NoneType error
+            #     return Response()
+            
             async def handle_sse(scope, receive, send):
                 async with sse_transport.connect_sse(scope, receive, send) as streams:
                     await server.run(streams[0], streams[1], options)
