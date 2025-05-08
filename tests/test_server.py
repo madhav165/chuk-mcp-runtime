@@ -1,5 +1,4 @@
 # tests/test_server.py
-
 import pytest
 import asyncio
 from contextlib import asynccontextmanager
@@ -17,6 +16,8 @@ class FakeServer:
         created_servers.append(self)
         self.name = name
         self.handlers = {}
+        # Add server_name for compatibility with entry.py
+        self.server_name = name
 
     def list_tools(self):
         def decorator(fn):
@@ -27,6 +28,12 @@ class FakeServer:
     def call_tool(self):
         def decorator(fn):
             self.handlers['call_tool'] = fn
+            return fn
+        return decorator
+    
+    def process_text(self):
+        def decorator(fn):
+            self.handlers['process_text'] = fn
             return fn
         return decorator
 
@@ -61,6 +68,20 @@ def patch_server(monkeypatch):
     yield
     created_servers.clear()
 
+# Helper function to safely run async code in tests
+def run_async(coro):
+    """Run an async coroutine in tests safely."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+    return loop.run_until_complete(coro)
+
 def test_list_and_call_tool():
     # Build server with stdio type
     config = {"server": {"type": "stdio"}, "tools": {}}
@@ -72,30 +93,24 @@ def test_list_and_call_tool():
     }
 
     # Run serve() to register handlers
-    asyncio.get_event_loop().run_until_complete(srv.serve())
+    run_async(srv.serve())
 
     # Grab the FakeServer instance and its handlers
     fake = created_servers[-1]
     handlers = fake.handlers
 
     # Test list_tools handler
-    tool_list = asyncio.get_event_loop().run_until_complete(
-        handlers['list_tools']()
-    )
+    tool_list = run_async(handlers['list_tools']())
     names = {tool.name for tool in tool_list}
     assert names == {"sync_echo", "async_echo"}
 
     # Test call_tool for sync function
-    result = asyncio.get_event_loop().run_until_complete(
-        handlers['call_tool']("sync_echo", {"msg": "hello"})
-    )
+    result = run_async(handlers['call_tool']("sync_echo", {"msg": "hello"}))
     assert len(result) == 1
     assert result[0].text == "echo:hello"
 
     # Test call_tool for async function
-    result2 = asyncio.get_event_loop().run_until_complete(
-        handlers['call_tool']("async_echo", {"msg": "world"})
-    )
+    result2 = run_async(handlers['call_tool']("async_echo", {"msg": "world"}))
     assert len(result2) == 1
     assert result2[0].text == "async_echo:world"
 
@@ -106,12 +121,10 @@ def test_call_tool_errors():
     srv.tools_registry = {}
 
     # Run serve() to bind handlers
-    asyncio.get_event_loop().run_until_complete(srv.serve())
+    run_async(srv.serve())
     fake = created_servers[-1]
     handlers = fake.handlers
 
     # Calling unknown tool should raise ValueError
     with pytest.raises(ValueError):
-        asyncio.get_event_loop().run_until_complete(
-            handlers['call_tool']("does_not_exist", {})
-        )
+        run_async(handlers['call_tool']("does_not_exist", {}))

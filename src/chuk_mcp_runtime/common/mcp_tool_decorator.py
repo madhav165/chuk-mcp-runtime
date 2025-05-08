@@ -105,17 +105,31 @@ def mcp_tool(name: str = None, description: str = None):
 
         # Attach metadata on the wrapper
         wrapper._mcp_tool = tool  # type: ignore
-        # Provide a sync helper
+        
+        # Provide a sync helper that works better in tests
         def sync_helper(*args, **kwargs):
-            loop = asyncio.get_event_loop()
+            # Create a new loop if there isn't one or if the current one is closed/running
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_closed():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+            except RuntimeError:
+                # "There is no current event loop in thread" error
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
             if loop.is_running():
+                # Create a completely new loop for this execution
                 new_loop = asyncio.new_event_loop()
                 try:
                     return new_loop.run_until_complete(wrapper(*args, **kwargs))
                 finally:
                     new_loop.close()
             else:
+                # Use the existing loop
                 return loop.run_until_complete(wrapper(*args, **kwargs))
+                
         wrapper.sync = sync_helper  # type: ignore
 
         # Register the wrapper, not the original func

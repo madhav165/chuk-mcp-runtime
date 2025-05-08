@@ -1,3 +1,4 @@
+# chuk_mcp_runtime/server.py
 # -*- coding: utf-8 -*-
 """
 CHUK MCP Server Module

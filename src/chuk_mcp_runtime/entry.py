@@ -3,7 +3,7 @@
 Entry point for the CHUK MCP Runtime.
 
 Starts the local MCP server *and* the optional proxy layer declared in the
-configuration.  Everything runs inside a single `asyncio` event‑loop so that
+configuration. Everything runs inside a single `asyncio` event‑loop so that
 shutdown (Ctrl‑C / EOF) is graceful and predictable.
 """
 
@@ -22,14 +22,18 @@ from chuk_mcp_runtime.proxy.manager import ProxyServerManager
 
 logger = get_logger("chuk_mcp_runtime.entry")
 
+# Flag to indicate if proxy support is available - always True in main code
+# (tests will override this when they need to disable proxy)
+HAS_PROXY_SUPPORT = True
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ────────────────────────────────────────────────────────────────────────────
 
 def _need_proxy(config: dict[str, Any]) -> bool:
-    """Return *True* if the `proxy` section is present *and* enabled."""
-    return bool(config.get("proxy", {}).get("enabled", False))
+    """Return *True* if the `proxy` section is present *and* enabled and HAS_PROXY_SUPPORT is True."""
+    return bool(config.get("proxy", {}).get("enabled", False)) and HAS_PROXY_SUPPORT
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -66,23 +70,63 @@ def run_runtime(
 
     # 3) ── async main coroutine that orchestrates proxy + server ───────
     async def _async_main() -> None:
-        proxy_mgr: ProxyServerManager | None = None
+        proxy_mgr = None
 
         # 3a) start proxy side‑cars if requested
         if _need_proxy(config):
-            proxy_mgr = ProxyServerManager(config, project_root)
-            await proxy_mgr.start_servers()
-            logger.info(
-                "Proxy layer enabled – %d server(s) booted",
-                len(proxy_mgr.running_servers),
-            )
+            try:
+                proxy_mgr = ProxyServerManager(config, project_root)
+                await proxy_mgr.start_servers()
+                if hasattr(proxy_mgr, 'running_servers') and proxy_mgr.running_servers:
+                    logger.info(
+                        "Proxy layer enabled – %d server(s) booted",
+                        len(proxy_mgr.running_servers),
+                    )
+                    
+                    # Register proxy tools with the MCP server
+                    proxy_tools = proxy_mgr.get_all_tools()
+                    if proxy_tools:
+                        logger.info("Found %d proxy tools", len(proxy_tools))
+            except Exception as e:
+                logger.error(f"Error starting proxy layer: {e}", exc_info=True)
+                proxy_mgr = None
+        
+        # 3b) Custom handler for proxy text processing
+        custom_handlers = None
+        if proxy_mgr and hasattr(proxy_mgr, 'process_text'):
+            async def handle_proxy_text(text):
+                try:
+                    return await proxy_mgr.process_text(text)
+                except Exception as e:
+                    logger.error(f"Error processing proxy text: {e}", exc_info=True)
+                    return [{"error": f"Proxy error: {str(e)}"}]
+                    
+            custom_handlers = {"handle_proxy_text": handle_proxy_text}
 
-        # 3b) launch the local MCP server (stdio by default)
+        # 3c) launch the local MCP server (stdio by default)
         mcp_server = MCPServer(config)
-        logger.info("Local MCP server '%s' starting", mcp_server.server_name)
-        await mcp_server.serve()  # blocks until EOF / KeyboardInterrupt
+        
+        # Safely log server name if available, for test compatibility
+        if hasattr(mcp_server, 'server_name'):
+            logger.info("Local MCP server '%s' starting", mcp_server.server_name)
+        else:
+            logger.info("Local MCP server starting")
+        
+        # If we have proxy tools, register them with the MCP server
+        if proxy_mgr and hasattr(proxy_mgr, 'get_all_tools'):
+            proxy_tools = proxy_mgr.get_all_tools()
+            for tool_name, tool_func in proxy_tools.items():
+                if hasattr(mcp_server, 'register_tool'):
+                    try:
+                        mcp_server.register_tool(tool_name, tool_func)
+                        logger.debug(f"Registered proxy tool: {tool_name}")
+                    except Exception as e:
+                        logger.error(f"Error registering proxy tool {tool_name}: {e}")
+        
+        # Start the MCP server
+        await mcp_server.serve(custom_handlers=custom_handlers)
 
-        # 3c) tear down proxy side‑cars on shutdown
+        # 3d) tear down proxy side‑cars on shutdown
         if proxy_mgr is not None:
             logger.info("Stopping proxy layer")
             await proxy_mgr.stop_servers()
@@ -124,4 +168,4 @@ def main(default_config: Optional[dict[str, Any]] = None) -> None:
 
 # Allow ``python -m chuk_mcp_runtime.entry`` for direct execution
 if __name__ == "__main__":
-    main()
+    main()  

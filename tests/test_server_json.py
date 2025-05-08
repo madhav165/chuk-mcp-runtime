@@ -15,6 +15,8 @@ class FakeServer:
     def __init__(self, name):
         _created.append(self)
         self.handlers = {}
+        # Add server_name for compatibility with entry.py
+        self.server_name = name
 
     def list_tools(self):
         def decorator(fn):
@@ -46,6 +48,20 @@ def patch_server(monkeypatch):
     monkeypatch.setattr(srv_mod, "stdio_server", dummy_stdio)
     yield
     _created.clear()
+
+# Helper function to safely run async code in tests
+def run_async(coro):
+    """Run an async coroutine in tests safely."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+    return loop.run_until_complete(coro)
 
 # --- JSON‐serializable tools ---
 
@@ -90,35 +106,35 @@ def test_json_serialization_and_awaiting():
     }
 
     # 3) Register handlers
-    asyncio.get_event_loop().run_until_complete(server.serve())
+    run_async(server.serve())
 
     fake = _created[-1]
     call = fake.handlers['call_tool']
 
     # -- dict_tool --
-    out = asyncio.get_event_loop().run_until_complete(call("dict_tool", {}))
+    out = run_async(call("dict_tool", {}))
     assert len(out) == 1
     parsed = json.loads(out[0].text)
     assert parsed == {"a": 1, "b": [2, 3], "c": {"x": True}}
 
     # -- list_tool --
-    out2 = asyncio.get_event_loop().run_until_complete(call("list_tool", {}))
+    out2 = run_async(call("list_tool", {}))
     assert len(out2) == 1
     parsed2 = json.loads(out2[0].text)
     assert parsed2 == ["hello", {"num": 5}, False]
 
     # -- string_tool --
-    out3 = asyncio.get_event_loop().run_until_complete(call("string_tool", {}))
+    out3 = run_async(call("string_tool", {}))
     assert len(out3) == 1
     assert out3[0].text == "plain text"
 
     # -- wrapped_tool --
-    out4 = asyncio.get_event_loop().run_until_complete(call("wrapped_tool", {}))
+    out4 = run_async(call("wrapped_tool", {}))
     assert len(out4) == 2
     assert out4[0].text == "already text 1"
     assert out4[1].text == "already text 2"
 
     # -- error_tool --
     with pytest.raises(ValueError) as ei:
-        asyncio.get_event_loop().run_until_complete(call("error_tool", {}))
+        run_async(call("error_tool", {}))
     assert "oh no" in str(ei.value)
