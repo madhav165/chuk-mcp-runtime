@@ -1,3 +1,4 @@
+# chuk_mcp_runtime/server/logging_config.py
 """
 Logging configuration module for CHUK MCP servers.
 
