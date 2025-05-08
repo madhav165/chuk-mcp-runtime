@@ -1,0 +1,87 @@
+# -------------------------------------------------------------------
+# Example CHUK MCP Runtime configuration (config.yaml)
+# -------------------------------------------------------------------
+# This single file turns the runtime into a “hub” that:
+#   • boots two local stdio-based MCP servers (echo + math)
+#   • connects to one remote SSE MCP server (weather)
+#   • exposes every remote tool under  proxy.<server>.<tool>
+#
+# Adjust paths / URLs / API keys to suit your environment.
+# -------------------------------------------------------------------
+
+# ── Host and logging ────────────────────────────────────────────────
+host:
+  name: chuk-proxy-mcp-server
+  log_level: INFO               # DEBUG for very chatty output
+
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  quiet_libraries: true         # silence noisy deps
+  reset_handlers: true
+
+# ── Core server execution model (stdio | websocket) ────────────────
+server:
+  type: stdio
+
+# ── Global tool registry location (don’t change this) ──────────────
+tools:
+  registry_module: chuk_mcp_runtime.common.mcp_tool_decorator
+  registry_attr: TOOLS_REGISTRY
+
+# ── Proxy settings ─────────────────────────────────────────────────
+proxy:
+  enabled: true                 # turn proxy feature on/off
+  namespace: proxy              # => proxy.<server>.<tool>
+
+# ── MCP servers to launch / attach to ──────────────────────────────
+#    Each key is a *server name*; the values describe how to reach it.
+mcp_servers:
+  # 1) Local “echo” demo server (stdio)
+  echo2:
+    enabled: true
+    type: stdio
+    # Directory containing the echo server; “uv” will run from here
+    location: /Users/christopherhay/chris-source/chuk-mcp-servers/chuk-mcp-echo-server
+    # The launcher command (uv) and its arguments
+    command: uv
+    args:
+      - --directory
+      - /Users/christopherhay/chris-source/chuk-mcp-servers/chuk-mcp-echo-server
+      - run
+      - src/chuk_mcp_echo_server/main.py
+
+  # # 2) Local “math” demo server (stdio)
+  # math:
+  #   enabled: true
+  #   type: stdio
+  #   location: /opt/mcp-servers/math_server
+  #   command: python
+  #   args: ["-m", "math_server"]        # e.g. python -m math_server
+
+  # # 3) Remote weather server exposed via SSE
+  # weather:
+  #   enabled: true
+  #   type: sse
+  #   url: "https://api.example.com/sse/weather"
+  #   api_key: "YOUR_WEATHER_API_KEY"
+
+# -------------------------------------------------------------------
+# Usage notes
+# -------------------------------------------------------------------
+# • Start the runtime normally (e.g. `python -m chuk_mcp_runtime` or
+#   via your own entry script).  The proxy manager will boot “echo”
+#   and “math”, establish an SSE connection to “weather”, and register
+#   every remote tool under:
+#
+#       proxy.echo.<tool>
+#       proxy.math.<tool>
+#       proxy.weather.<tool>
+#
+# • From an LLM, call them like:
+#       <tool name="proxy.echo.echo"   args='{"message": "hi"}'/>
+#       <tool name="proxy.math.add"    args='{"a": 2, "b": 3}'/>
+#       <tool name="proxy.weather.get" args='{"city": "London"}'/>
+#
+# • Set `proxy.enabled: false` to run the runtime without any of the
+#   proxied servers (handy for local-only debugging).
