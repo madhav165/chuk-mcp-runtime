@@ -1,23 +1,16 @@
+# chuk_mcp_runtime/proxy/manager.py
 """
 chuk_mcp_runtime.proxy.manager
 ================================
 
-Start/stop local or remote MCP side‑cars and expose their tools locally.
-Each remote tool appears exactly **once**:
+Single-switch design:
 
-• dot wrapper :  ``proxy.<server>.<tool>``  (internal)
-• underscore  :  ``<server>_<tool>``        (OpenAI‑style)
+* `openai_compatible: true`  → expose **underscore** aliases only
+* `openai_compatible: false` → expose **dot** aliases only
 
-Flags in the YAML ``proxy`` section drive the behaviour:
-
-```yaml
-proxy:
-  enabled: true            # turn the feature on/off
-  namespace: proxy         # dot‑prefix for internal wrappers
-  openai_compatible: true  # build underscore aliases
-  keep_root_aliases: false # keep/destroy proxy.* aliases (when openai‑only)
-  only_openai_tools: false # expose *only* underscore aliases
-```
+The internal dot-wrapper (`proxy.<server>.<tool>`) is always generated
+so underscore aliases have something to delegate to - but it's removed
+from `TOOLS_REGISTRY` when OpenAI mode is on.
 """
 from __future__ import annotations
 
@@ -36,56 +29,40 @@ from chuk_mcp_runtime.proxy.tool_wrapper import create_proxy_tool
 from chuk_mcp_runtime.server.logging_config import get_logger
 
 try:
-    # Optional – only present if chuk‑tool‑processor is installed
     from chuk_tool_processor.mcp import setup_mcp_stdio
-    from chuk_tool_processor.registry import ToolRegistryProvider
-except ModuleNotFoundError:  # type‑checking stubs
-
-    class ToolRegistryProvider:  # type: ignore
-        @staticmethod
-        def get_registry():
-            class _Dummy:
-                def list_tools(self):
-                    return []
-
-            return _Dummy()
+except ModuleNotFoundError:  # optional dep stubs
+    async def setup_mcp_stdio(*_, **__):
+        raise RuntimeError("chuk_tool_processor not installed-stdio proxy unsupported")
 
 logger = get_logger("chuk_mcp_runtime.proxy")
 
 # ───────────────────────── helpers ──────────────────────────
 
-def to_openai_name(dotted: str) -> str:
-    """Historical helper (kept for backwards compatibility)."""
-    return to_openai_compatible_name(dotted.replace("proxy.", "", 1))
+def strip_proxy_prefix(name: str) -> str:
+    """Remove leading "proxy." from a dotted name if present."""
+    return name[6:] if name.startswith("proxy.") else name
 
 
 # ───────────────────────── manager ──────────────────────────
 class ProxyServerManager:
-    """Boot the proxy layer and wire up tool wrappers."""
+    """Spin up MCP side‑cars and expose their tools locally."""
 
-    # ─────────────── construction / teardown ────────────────
     def __init__(self, cfg: Dict[str, Any], project_root: str):
         pxy = cfg.get("proxy", {})
         self.enabled = pxy.get("enabled", False)
         self.ns_root = pxy.get("namespace", "proxy")
-        self.keep_root_aliases = pxy.get("keep_root_aliases", False)
         self.openai_mode = pxy.get("openai_compatible", False)
-        self.only_openai = pxy.get("only_openai_tools", False) and self.openai_mode
+
         self.project_root = project_root
         self.mcp_servers = cfg.get("mcp_servers", {})
 
         logger.setLevel(logging.DEBUG)
-        logger.debug(
-            "Proxy init – openai=%s | only_openai=%s | keep_root=%s",
-            self.openai_mode,
-            self.only_openai,
-            self.keep_root_aliases,
-        )
+        logger.debug("Proxy init-openai_mode=%s", self.openai_mode)
 
         self.stream_manager = None
         self.running: Dict[str, Dict[str, Any]] = {}
-        self._tmp_cfg: tempfile.NamedTemporaryFile | None = None
         self.openai_wrappers: Dict[str, Callable] = {}
+        self._tmp_cfg: tempfile.NamedTemporaryFile | None = None
 
     # ─────────────────────── bootstrap / shutdown ───────────────────────
     async def start_servers(self) -> None:
@@ -97,10 +74,10 @@ class ProxyServerManager:
         stdio, stdio_map = [], {}
         for name, opts in self.mcp_servers.items():
             if opts.get("type", "stdio") != "stdio":
-                continue  # SSE not yet wired here
+                continue
             stdio.append(name)
             stdio_map[len(stdio_map)] = name
-            cwd = opts.get("location") or ""
+            cwd = opts.get("location", "")
             if cwd and not os.path.isabs(cwd):
                 cwd = os.path.join(self.project_root, cwd)
             stdio_cfg["mcpServers"][name] = {
@@ -113,7 +90,6 @@ class ProxyServerManager:
             logger.error("No stdio servers configured")
             return
 
-        # Write minimal config for tool‑processor stdio launcher
         self._tmp_cfg = tempfile.NamedTemporaryFile(mode="w", delete=False)
         json.dump(stdio_cfg, self._tmp_cfg)
         self._tmp_cfg.flush()
@@ -140,7 +116,6 @@ class ProxyServerManager:
 
     # ───────────────────── internal helpers ─────────────────────
     async def _discover_and_wrap(self) -> None:
-        """Query each server, build dot‑wrappers and OpenAI aliases."""
         if not self.stream_manager:
             return
 
@@ -153,60 +128,47 @@ class ProxyServerManager:
                 dotted_ns = f"{self.ns_root}.{server}"
                 dotted_full = f"{dotted_ns}.{tool_name}"
 
-                # ------------------------------------------------------------------
-                # 1) DOT‑NAME WRAPPER (internal + for OpenAI factory)                
-                # ------------------------------------------------------------------
-                wrapper = create_proxy_tool(
-                    dotted_ns,
-                    tool_name,
-                    self.stream_manager,
-                    meta,
-                    only_openai_tools=self.only_openai,
-                )
+                # 1) Always create internal dot‑wrapper
+                wrapper = create_proxy_tool(dotted_ns, tool_name, self.stream_manager, meta)
                 self.running[server]["wrappers"][tool_name] = wrapper
 
-                # Drop from public registry if underscore‑only mode
-                if self.only_openai:
+                if self.openai_mode:
+                    # Remove dot‑wrapper from public registry
                     TOOLS_REGISTRY.pop(dotted_full, None)
 
-                # ------------------------------------------------------------------
-                # 2) UNDERSCORE ALIAS (OpenAI‑style)                                 
-                # ------------------------------------------------------------------
-                if not self.openai_mode:
-                    continue
+                    # Build underscore alias once
+                    under_name = to_openai_compatible_name(strip_proxy_prefix(dotted_full))
+                    if under_name in self.openai_wrappers:
+                        continue
+                    alias = create_openai_compatible_wrapper(dotted_full, wrapper)
+                    if alias:
+                        TOOLS_REGISTRY[under_name] = alias
+                        self.openai_wrappers[under_name] = alias
+                        logger.debug("Registered underscore wrapper: %s", under_name)
+                # else (non‑OpenAI mode) → keep dot wrapper; no underscore alias
 
-                under_name = to_openai_name(dotted_full)
-                if under_name in self.openai_wrappers:
-                    continue  # already done
-
-                alias = create_openai_compatible_wrapper(dotted_full, wrapper)
-                if alias is None:
-                    continue  # metadata missing
-
-                TOOLS_REGISTRY[under_name] = alias
-                self.openai_wrappers[under_name] = alias
-                logger.debug("Registered underscore wrapper: %s", under_name)
-
-        # Diagnostics ---------------------------------------------------
-        dot = [k for k in TOOLS_REGISTRY if "." in k and "_" not in k]
+        dot = [k for k in TOOLS_REGISTRY if "." in k]
         under = [k for k in TOOLS_REGISTRY if "_" in k and "." not in k]
-        logger.debug("Registry overview – dot: %d | under: %d", len(dot), len(under))
+        logger.debug("Registry overview-dot:%d | under:%d", len(dot), len(under))
 
     # ───────────────────── public helpers ─────────────────────────
     def get_all_tools(self) -> Dict[str, Callable]:
-        """Return all publicly exposed tools respecting config flags."""
-        exposed: Dict[str, Callable] = dict(self.openai_wrappers)
-        if not self.only_openai:
-            for srv, info in self.running.items():
-                for t_name, fn in info["wrappers"].items():
-                    exposed[f"{self.ns_root}.{srv}.{t_name}"] = fn
+        if self.openai_mode:
+            return dict(self.openai_wrappers)
+        # expose dot names
+        exposed: Dict[str, Callable] = {}
+        for srv, info in self.running.items():
+            exposed.update({f"{self.ns_root}.{srv}.{n}": fn for n, fn in info["wrappers"].items()})
         return exposed
 
     async def call_tool(self, name: str, **kw):
-        """Convenience helper: call a tool by public name."""
-        if "_" in name and "." not in name:  # convert underscore → dot
-            server, tool = name.split("_", 1)
-            name = f"{self.ns_root}.{server}.{tool}"
+        """Convenience proxy that maps underscore names back to dot."""
+        if "_" in name and name not in TOOLS_REGISTRY:
+            # Convert back to dotted form
+            parts = name.split("_", 1)
+            if len(parts) == 2:
+                server, tool = parts
+                name = f"{self.ns_root}.{server}.{tool}"
         srv = name.split(".")[1]
         tool = name.split(".")[-1]
         return await self.stream_manager.call_tool(tool, kw, srv)  # type: ignore[arg-type]

@@ -1,6 +1,11 @@
 # CHUK MCP Runtime
 
-CHUK MCP Runtime connects local and remote MCP (Model Context Protocol) servers. Host your own Python-based MCP tools locally or connect to remote servers over stdio or SSE.
+CHUK MCP Runtime is a flexible framework that connects local and remote MCP (Model Context Protocol) servers. It enables you to:
+
+- Host your own Python-based MCP tools locally
+- Connect to remote MCP servers through stdio or SSE protocols
+- Provide OpenAI-compatible function calling interfaces
+- Create proxy layers that expose multiple MCP servers through a single endpoint
 
 ## Installation
 
@@ -15,17 +20,82 @@ uv pip install chuk-mcp-runtime[websocket,dev]
 uv pip install tzdata
 ```
 
-## Quick Start: Proxy Examples
+## Core Components
 
-### Example 1: stdio → stdio (Basic Proxy)
+The CHUK MCP Runtime consists of two main command-line tools:
 
-Run an MCP stdio server and expose it through the proxy layer over stdio.
+1. **`chuk-mcp-server`**: Runs a complete MCP server with local tools and optional proxy support
+2. **`chuk-mcp-proxy`**: Provides a lightweight proxy layer that wraps remote MCP servers
+
+## Quick Start: Using the Proxy
+
+The proxy layer allows you to expose tools from multiple MCP servers through a unified interface.
+
+### Example 1: Basic Command Line Usage
+
+Run an MCP proxy with a time server:
+
+```bash
+# Start a proxy to the time server with dot notation (proxy.time.get_current_time)
+uv run -m chuk_mcp_runtime.proxy_cli --stdio time --command uvx --args mcp-server-time --local-timezone America/New_York
+
+# Start a proxy with OpenAI-compatible underscore notation (time_get_current_time)
+uv run -m chuk_mcp_runtime.proxy_cli --stdio time --command uvx --args mcp-server-time --local-timezone America/New_York --openai-compatible
+```
+
+You can also use the `--` separator for command arguments:
+
+```bash
+uv run -m chuk_mcp_runtime.proxy_cli --stdio time --command uvx -- mcp-server-time --local-timezone America/New_York
+```
+
+Once the proxy is running, you'll see output like:
+```
+Running servers : time
+Wrapped tools   : proxy.time.get_current_time, proxy.time.convert_time
+Smoke-test call : ...
+```
+
+### Example 2: Configuration File
+
+Create a YAML configuration file:
 
 ```yaml
 # stdio_proxy_config.yaml
 proxy:
   enabled: true
   namespace: "proxy"
+  openai_compatible: false  # Use true for underscore notation (time_get_current_time)
+
+mcp_servers:
+  time:
+    type: "stdio"
+    command: "uvx"
+    args: ["mcp-server-time", "--local-timezone", "America/New_York"]
+  
+  echo:
+    type: "stdio"
+    command: "python"
+    args: ["examples/echo_server/main.py"]
+```
+
+Run the proxy with the config file:
+
+```bash
+uv run -m chuk_mcp_runtime.proxy_cli --config stdio_proxy_config.yaml
+```
+
+### Example 3: OpenAI-Compatible Mode
+
+To expose tools with underscore notation (compatible with OpenAI function calling):
+
+```yaml
+# openai_compatible_config.yaml
+proxy:
+  enabled: true
+  namespace: "proxy"
+  openai_compatible: true   # Enable underscore notation
+  only_openai_tools: true   # Only register underscore-notation tools
 
 mcp_servers:
   time:
@@ -34,102 +104,15 @@ mcp_servers:
     args: ["mcp-server-time", "--local-timezone", "America/New_York"]
 ```
 
-Run the proxy:
+Run with:
 
 ```bash
-# Using config file
-chuk-mcp-proxy --config stdio_proxy_config.yaml
-
-# Using command-line arguments (two equivalent methods)
-# Method 1: Using --args (everything after --args goes to the command)
-uv run chuk-mcp-proxy --stdio time --command uvx --args mcp-server-time --local-timezone America/New_York
-
-# Method 2: Using -- (everything after -- goes to the command)
-uv run chuk-mcp-proxy --stdio time --command uvx -- mcp-server-time --local-timezone America/New_York
-
+uv run -m chuk_mcp_runtime.proxy_cli --config openai_compatible_config.yaml
 ```
 
-Once the proxy is running, you'll see output like:
-```
-Running servers : time
-Wrapped tools   : proxy.time.get_current_time, proxy.time.convert_time
-```
+This exposes tools like `time_get_current_time` instead of `proxy.time.get_current_time`.
 
-Example tool calls:
-
-```json
-{
-  "name": "proxy.time.get_current_time",
-  "arguments": {
-    "timezone": "America/New_York"
-  }
-}
-```
-
-```json
-{
-  "name": "proxy.time.convert_time",
-  "arguments": {
-    "time": "2025-05-08T12:00:00",
-    "source_timezone": "UTC",
-    "target_timezone": "America/New_York"
-  }
-}
-```
-
-> **Note:** If you encounter timezone errors (e.g., `ZoneInfoNotFoundError: 'No time zone found with key BST'`), make sure you have the `tzdata` package installed: `uv pip install tzdata`
-
-### Example 2: stdio → SSE (Web Exposure)
-
-Expose a local stdio MCP server as an SSE endpoint for web clients.
-
-```yaml
-# sse_proxy_config.yaml
-proxy:
-  enabled: true
-  namespace: "proxy"
-
-# Local stdio server to proxy
-mcp_servers:
-  time:
-    type: "stdio"
-    command: "uvx"
-    args: ["mcp-server-time", "--timezone", "America/New_York"]
-
-# SSE server configuration
-server:
-  type: "sse"
-  port: 8000
-  host: "localhost"
-  sse_path: "/sse"
-  message_path: "/message"
-```
-
-Run the SSE proxy:
-
-```bash
-# Start the server
-chuk-mcp-server --config sse_proxy_config.yaml
-```
-
-Connect to the SSE endpoint:
-
-```bash
-# Subscribe to events
-curl -N http://localhost:8000/sse
-
-# Send a message
-curl -X POST http://localhost:8000/message \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "proxy.time.get_current_time",
-    "arguments": {
-      "timezone": "America/New_York"
-    }
-  }'
-```
-
-## Creating Custom MCP Tools
+## Creating Local MCP Tools
 
 ### 1. Create a custom tool
 
@@ -173,12 +156,12 @@ mcp_servers:
 ### 3. Run the server
 
 ```bash
-chuk-mcp-server --config config.yaml
+uv run -m chuk_mcp_runtime.main --config config.yaml
 ```
 
-## Combined Local + Proxy Server
+## Running a Combined Local + Proxy Server
 
-Run a local MCP server that also connects to remote servers.
+You can run a single server that provides both local tools and proxied remote tools:
 
 ```yaml
 # combined_config.yaml
@@ -186,6 +169,7 @@ host:
   name: "combined-server"
   log_level: "INFO"
 
+# Local server configuration
 server:
   type: "stdio"
 
@@ -204,6 +188,7 @@ mcp_servers:
 proxy:
   enabled: true
   namespace: "proxy"
+  openai_compatible: false
   
   # Remote servers
   mcp_servers:
@@ -211,12 +196,17 @@ proxy:
       type: "stdio"
       command: "uvx"
       args: ["mcp-server-time", "--local-timezone", "America/New_York"]
+    
+    echo:
+      type: "stdio"
+      command: "python"
+      args: ["examples/echo_server/main.py"]
 ```
 
 Start the combined server:
 
 ```bash
-chuk-mcp-server --config combined_config.yaml
+uv run -m chuk_mcp_runtime.main --config combined_config.yaml
 ```
 
 ## Command Reference
@@ -233,10 +223,10 @@ Options:
 - `--sse NAME`: Add a remote SSE MCP server (repeatable)
 - `--command CMD`: Executable for stdio servers (default: python)
 - `--cwd DIR`: Working directory for stdio server
-- `--args ...`: Additional args for the stdio command (or use `--` to separate arguments)
+- `--args ...`: Additional args for the stdio command
 - `--url URL`: SSE base URL
 - `--api-key KEY`: SSE API key (or set API_KEY env var)
-- `--keep-aliases`: Keep single-dot aliases proxy.<tool>
+- `--openai-compatible`: Use OpenAI-compatible tool names (underscores)
 
 ### chuk-mcp-server
 
@@ -246,43 +236,100 @@ chuk-mcp-server [CONFIG_PATH]
 
 Options:
 - `CONFIG_PATH`: Path to configuration YAML (optional, defaults to searching common locations)
-- Environment variable: `CHUK_MCP_CONFIG_PATH` can be used instead of command-line argument
+
+Environment variables:
+- `CHUK_MCP_CONFIG_PATH`: Alternative to providing config path as argument
+- `CHUK_MCP_LOG_LEVEL`: Set logging level (INFO, DEBUG, etc.)
+- `NO_BOOTSTRAP`: Set to disable component bootstrap at startup
+- `API_KEY`: API key for SSE servers (alternative to --api-key)
+
+## Using the Web Server
+
+To expose MCP tools through a web interface:
+
+```yaml
+# web_server_config.yaml
+proxy:
+  enabled: true
+  namespace: "proxy"
+
+# Local stdio server to proxy
+mcp_servers:
+  time:
+    type: "stdio"
+    command: "uvx"
+    args: ["mcp-server-time", "--local-timezone", "America/New_York"]
+
+# SSE server configuration
+server:
+  type: "sse"
+  port: 8000
+  host: "localhost"
+  sse_path: "/sse"
+  message_path: "/message"
+```
+
+Run the SSE server:
+
+```bash
+uv run -m chuk_mcp_runtime.main --config web_server_config.yaml
+```
+
+Connect to the SSE endpoint:
+
+```bash
+# Subscribe to events
+curl -N http://localhost:8000/sse
+
+# Send a message
+curl -X POST http://localhost:8000/message \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "proxy.time.get_current_time",
+    "arguments": {
+      "timezone": "America/New_York"
+    }
+  }'
+```
 
 ## Using Proxy Tools Programmatically
 
 ```python
 import asyncio
-from chuk_mcp_runtime.entry import run_runtime
-from chuk_mcp_runtime.common.mcp_tool_decorator import TOOLS_REGISTRY
+from chuk_mcp_runtime.proxy.manager import ProxyServerManager
+from chuk_mcp_runtime.server.config_loader import load_config
 
 async def example():
-    # Access the proxied tool by its fully qualified name
-    time_tool = TOOLS_REGISTRY.get("proxy.time.get_current_time")
+    # Load configuration
+    config = load_config(["config.yaml"])
     
-    # Call the tool
-    time_result = await time_tool(timezone="America/New_York")
+    # Initialize and start proxy manager
+    proxy = ProxyServerManager(config, ".")
+    await proxy.start_servers()
     
-    print(f"Current time: {time_result}")
+    try:
+        # Get available tools
+        tools = proxy.get_all_tools()
+        print(f"Available tools: {', '.join(tools.keys())}")
+        
+        # Call time tool
+        if "proxy.time.get_current_time" in tools:
+            result = await tools["proxy.time.get_current_time"](timezone="UTC")
+            print(f"Current time: {result}")
+        
+        # Or call directly through the proxy manager
+        result = await proxy.call_tool("proxy.time.get_current_time", timezone="UTC")
+        print(f"Current time (via manager): {result}")
+    
+    finally:
+        # Clean up
+        await proxy.stop_servers()
 
 if __name__ == "__main__":
-    # Run in background
-    loop = asyncio.get_event_loop()
-    loop.create_task(run_runtime())
-    loop.run_until_complete(example())
+    asyncio.run(example())
 ```
 
 ## Troubleshooting
-
-### Timezone Errors
-
-If you encounter errors like `ZoneInfoNotFoundError: 'No time zone found with key BST'`, it's because the Python zoneinfo module is missing the required timezone data. To fix this:
-
-```bash
-# Install the tzdata package
-uv pip install tzdata
-```
-
-This is particularly important when working with the time server example.
 
 ### Command-line Arguments
 
@@ -293,65 +340,23 @@ mcp-server-time: error: unrecognized arguments: --timezone America/New_York
 
 Check that:
 1. You're using the correct parameter name (`--local-timezone` for the time server, not `--timezone`)
-2. Your command-line arguments are being passed correctly to the tool
+2. Use either `--args` or `--` to properly pass arguments to the child process:
 
-Two ways to pass arguments to the child process:
 ```bash
-# Method 1: Using --args (everything after --args goes to the command)
-chuk-mcp-proxy --stdio time --command uvx --args mcp-server-time --local-timezone America/New_York
+# Method 1: Using --args
+uv run -m chuk_mcp_runtime.proxy_cli --stdio time --command uvx --args mcp-server-time --local-timezone America/New_York
 
-# Method 2: Using -- (everything after -- goes to the command)
-chuk-mcp-proxy --stdio time --command uvx -- mcp-server-time --local-timezone America/New_York
+# Method 2: Using --
+uv run -m chuk_mcp_runtime.proxy_cli --stdio time --command uvx -- mcp-server-time --local-timezone America/New_York
 ```
 
-## License
+### OpenAI Compatibility
 
-MIT Licensemcp-proxy [OPTIONS]
-```
+If you're having issues with OpenAI compatibility:
 
-Options:
-- `--config FILE`: YAML config file (optional, can be combined with flags below)
-- `--stdio NAME`: Add a local stdio MCP server (repeatable)
-- `--sse NAME`: Add a remote SSE MCP server (repeatable)
-- `--command CMD`: Executable for stdio servers (default: python)
-- `--cwd DIR`: Working directory for stdio server
-- `--args ...`: Additional args for the stdio command
-- `--url URL`: SSE base URL
-- `--api-key KEY`: SSE API key (or set API_KEY env var)
-- `--keep-aliases`: Keep single-dot aliases proxy.<tool>
-
-### chuk-mcp-server
-
-```
-chuk-mcp-server [CONFIG_PATH]
-```
-
-Options:
-- `CONFIG_PATH`: Path to configuration YAML (optional, defaults to searching common locations)
-- Environment variable: `CHUK_MCP_CONFIG_PATH` can be used instead of command-line argument
-
-## Using Proxy Tools Programmatically
-
-```python
-import asyncio
-from chuk_mcp_runtime.entry import run_runtime
-from chuk_mcp_runtime.common.mcp_tool_decorator import TOOLS_REGISTRY
-
-async def example():
-    # Access the proxied tool by its fully qualified name
-    time_tool = TOOLS_REGISTRY.get("proxy.time.get_current_time")
-    
-    # Call the tool
-    time_result = await time_tool(timezone="America/New_York")
-    
-    print(f"Current time: {time_result}")
-
-if __name__ == "__main__":
-    # Run in background
-    loop = asyncio.get_event_loop()
-    loop.create_task(run_runtime())
-    loop.run_until_complete(example())
-```
+1. Make sure `openai_compatible: true` is set in your proxy configuration
+2. Tools will be exposed with underscore names (e.g., `time_get_current_time`)
+3. If using `only_openai_tools: true`, only underscore notation will be registered
 
 ## License
 
