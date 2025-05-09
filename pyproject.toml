@@ -1,53 +1,53 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "chuk-mcp-runtime"
 version = "0.1.18"
-description = "Generic CHUK MCP Runtime for MCP Servers"
+description = "Generic CHUK MCP Runtime for MCP servers"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
-authors = [
-    {name = "Chris Hay", email = "your.email@example.com"}
-]
+authors = [{name = "Chris Hay", email = "your.email@example.com"}]
 classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
 ]
+
 dependencies = [
-    "chuk-tool-processor>=0.1.5",
-    "mcp>=1.6.0",
-    "pydantic>=2.10.6",
-    "pyyaml>=6.0.2",
+  "chuk-tool-processor>=0.1.6",
+  "mcp>=1.6.0",
+  "pydantic>=2.10.6",
+  "pyyaml>=6.0.2",
 ]
 
 [project.optional-dependencies]
 websocket = ["websockets>=10.0"]
 dev = [
+  "pytest>=8.3.5",
+  "pytest-asyncio>=0.26.0",
+  "ruff>=0.4.6",
 ]
 
 [project.scripts]
 chuk-mcp-server = "chuk_mcp_runtime.main:main"
+chuk-mcp-proxy  = "chuk_mcp_runtime.proxy_cli:cli"
 
 [tool.setuptools.packages.find]
-where = ["src"]  # Change from "." to "src"
+where = ["src"]
 include = ["chuk_mcp_runtime*"]
 
 [tool.setuptools.package-data]
-chuk_mcp_runtime = ["config.yaml"]
+chuk_mcp_runtime = [
+  "config.yaml",          # default runtime config
+  "py.typed",             # typing marker
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-v"
-asyncio_default_fixture_loop_scope = "function"
 asyncio_mode = "strict"
-
-[dependency-groups]
-dev = [
-    "pytest-asyncio>=0.26.0",
-    "pytest>=8.3.5",
-]

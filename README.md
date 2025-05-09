@@ -1,39 +1,159 @@
 # CHUK MCP Runtime
-A generic framework for creating MCP (Messaging Control Protocol) servers that can be installed as a package on any MCP server.
 
-## Features
-
-- Flexible configuration system with YAML support
-- Automatic tool discovery and registration
-- Configurable logging
-- Server registry for managing multiple MCP servers
-- Runtime for hosting MCP tools
-- Easy-to-use tool decorator for registering functions as MCP tools
+CHUK MCP Runtime connects local and remote MCP (Model Context Protocol) servers. Host your own Python-based MCP tools locally or connect to remote servers over stdio or SSE.
 
 ## Installation
 
 ```bash
-# Install from PyPI
-pip install chuk-mcp-runtime
+# Basic installation
+uv pip install chuk-mcp-runtime
 
-# Install with optional dependencies
-pip install chuk-mcp-runtime[websocket,dev]
+# With optional dependencies
+uv pip install chuk-mcp-runtime[websocket,dev]
 
-# Install from source
-git clone https://github.com/yourusername/chuk-mcp-runtime.git
-cd chuk-mcp-runtime
-pip install -e .
+# Make sure to install tzdata for proper timezone support
+uv pip install tzdata
 ```
 
-## Quick Start
+## Quick Start: Proxy Examples
 
-### 1. Create a configuration file
+### Example 1: stdio → stdio (Basic Proxy)
 
-Create a `config.yaml` file:
+Run an MCP stdio server and expose it through the proxy layer over stdio.
 
 ```yaml
+# stdio_proxy_config.yaml
+proxy:
+  enabled: true
+  namespace: "proxy"
+
+mcp_servers:
+  time:
+    type: "stdio"
+    command: "uvx"
+    args: ["mcp-server-time", "--local-timezone", "America/New_York"]
+```
+
+Run the proxy:
+
+```bash
+# Using config file
+chuk-mcp-proxy --config stdio_proxy_config.yaml
+
+# Using command-line arguments (two equivalent methods)
+# Method 1: Using --args (everything after --args goes to the command)
+uv run chuk-mcp-proxy --stdio time --command uvx --args mcp-server-time --local-timezone America/New_York
+
+# Method 2: Using -- (everything after -- goes to the command)
+uv run chuk-mcp-proxy --stdio time --command uvx -- mcp-server-time --local-timezone America/New_York
+
+```
+
+Once the proxy is running, you'll see output like:
+```
+Running servers : time
+Wrapped tools   : proxy.time.get_current_time, proxy.time.convert_time
+```
+
+Example tool calls:
+
+```json
+{
+  "name": "proxy.time.get_current_time",
+  "arguments": {
+    "timezone": "America/New_York"
+  }
+}
+```
+
+```json
+{
+  "name": "proxy.time.convert_time",
+  "arguments": {
+    "time": "2025-05-08T12:00:00",
+    "source_timezone": "UTC",
+    "target_timezone": "America/New_York"
+  }
+}
+```
+
+> **Note:** If you encounter timezone errors (e.g., `ZoneInfoNotFoundError: 'No time zone found with key BST'`), make sure you have the `tzdata` package installed: `uv pip install tzdata`
+
+### Example 2: stdio → SSE (Web Exposure)
+
+Expose a local stdio MCP server as an SSE endpoint for web clients.
+
+```yaml
+# sse_proxy_config.yaml
+proxy:
+  enabled: true
+  namespace: "proxy"
+
+# Local stdio server to proxy
+mcp_servers:
+  time:
+    type: "stdio"
+    command: "uvx"
+    args: ["mcp-server-time", "--timezone", "America/New_York"]
+
+# SSE server configuration
+server:
+  type: "sse"
+  port: 8000
+  host: "localhost"
+  sse_path: "/sse"
+  message_path: "/message"
+```
+
+Run the SSE proxy:
+
+```bash
+# Start the server
+chuk-mcp-server --config sse_proxy_config.yaml
+```
+
+Connect to the SSE endpoint:
+
+```bash
+# Subscribe to events
+curl -N http://localhost:8000/sse
+
+# Send a message
+curl -X POST http://localhost:8000/message \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "proxy.time.get_current_time",
+    "arguments": {
+      "timezone": "America/New_York"
+    }
+  }'
+```
+
+## Creating Custom MCP Tools
+
+### 1. Create a custom tool
+
+```python
+# my_tools/tools.py
+from chuk_mcp_runtime.common.mcp_tool_decorator import mcp_tool
+
+@mcp_tool(name="get_current_time", description="Get the current time in a timezone")
+def get_current_time(timezone: str = "UTC") -> str:
+    """Get the current time in the specified timezone."""
+    from datetime import datetime
+    import pytz
+    
+    tz = pytz.timezone(timezone)
+    now = datetime.now(tz)
+    return now.strftime("%Y-%m-%d %H:%M:%S %Z")
+```
+
+### 2. Create a config file
+
+```yaml
+# config.yaml
 host:
-  name: "my-chuk-mcp-server"
+  name: "my-mcp-server"
   log_level: "INFO"
 
 server:
@@ -44,172 +164,195 @@ tools:
   registry_attr: "TOOLS_REGISTRY"
 
 mcp_servers:
-  my_server:
-    location: "./my_server"
-    enabled: true
+  my_tools:
+    location: "./my_tools"
     tools:
-      module: "my_server.tools"
-      enabled: true
-```
-
-### 2. Create a tools module
-
-Create a file `my_server/tools.py`:
-
-```python
-from chuk_mcp_runtime.common.mcp_tool_decorator import mcp_tool
-
-@mcp_tool(name="greet", description="Generate a greeting")
-def greet(name: str, formal: bool = False) -> str:
-    """
-    Generate a greeting message.
-    
-    Args:
-        name: Name to greet.
-        formal: Whether to use a formal greeting.
-        
-    Returns:
-        Greeting message.
-    """
-    if formal:
-        return f"Good day, {name}. It is a pleasure to meet you."
-    else:
-        return f"Hey {name}! How's it going?"
+      module: "my_tools.tools"
 ```
 
 ### 3. Run the server
 
-You can run the server in several ways:
+```bash
+chuk-mcp-server --config config.yaml
+```
+
+## Combined Local + Proxy Server
+
+Run a local MCP server that also connects to remote servers.
+
+```yaml
+# combined_config.yaml
+host:
+  name: "combined-server"
+  log_level: "INFO"
+
+server:
+  type: "stdio"
+
+tools:
+  registry_module: "chuk_mcp_runtime.common.mcp_tool_decorator"
+  registry_attr: "TOOLS_REGISTRY"
+
+# Local tools
+mcp_servers:
+  local_tools:
+    location: "./my_tools"
+    tools:
+      module: "my_tools.tools"
+
+# Proxy configuration
+proxy:
+  enabled: true
+  namespace: "proxy"
+  
+  # Remote servers
+  mcp_servers:
+    time:
+      type: "stdio"
+      command: "uvx"
+      args: ["mcp-server-time", "--local-timezone", "America/New_York"]
+```
+
+Start the combined server:
 
 ```bash
-# Using the command-line entry point
-chuk-mcp-server
-
-# Using the Python module
-python -m chuk_mcp_runtime
-
-# With a specific config file
-CHUK_MCP_CONFIG_PATH=./my_config.yaml chuk-mcp-server
+chuk-mcp-server --config combined_config.yaml
 ```
 
-## Creating a Custom MCP Server
+## Command Reference
 
-### Basic Server
+### chuk-mcp-proxy
+
+```
+chuk-mcp-proxy [OPTIONS]
+```
+
+Options:
+- `--config FILE`: YAML config file (optional, can be combined with flags below)
+- `--stdio NAME`: Add a local stdio MCP server (repeatable)
+- `--sse NAME`: Add a remote SSE MCP server (repeatable)
+- `--command CMD`: Executable for stdio servers (default: python)
+- `--cwd DIR`: Working directory for stdio server
+- `--args ...`: Additional args for the stdio command (or use `--` to separate arguments)
+- `--url URL`: SSE base URL
+- `--api-key KEY`: SSE API key (or set API_KEY env var)
+- `--keep-aliases`: Keep single-dot aliases proxy.<tool>
+
+### chuk-mcp-server
+
+```
+chuk-mcp-server [CONFIG_PATH]
+```
+
+Options:
+- `CONFIG_PATH`: Path to configuration YAML (optional, defaults to searching common locations)
+- Environment variable: `CHUK_MCP_CONFIG_PATH` can be used instead of command-line argument
+
+## Using Proxy Tools Programmatically
 
 ```python
 import asyncio
-from chuk_mcp_runtime.server.server import MCPServer
-from chuk_mcp_runtime.server.config_loader import load_config
-from chuk_mcp_runtime.common.mcp_tool_decorator import mcp_tool
+from chuk_mcp_runtime.entry import run_runtime
+from chuk_mcp_runtime.common.mcp_tool_decorator import TOOLS_REGISTRY
 
-# Define tools
-@mcp_tool(name="example", description="Example tool")
-def example_tool(param: str) -> dict:
-    return {"result": f"Processed: {param}"}
-
-async def main():
-    # Load config
-    config = load_config()
+async def example():
+    # Access the proxied tool by its fully qualified name
+    time_tool = TOOLS_REGISTRY.get("proxy.time.get_current_time")
     
-    # Create tools registry
-    tools_registry = {"example": example_tool}
+    # Call the tool
+    time_result = await time_tool(timezone="America/New_York")
     
-    # Create and run server
-    server = MCPServer(config, tools_registry=tools_registry)
-    await server.serve()
+    print(f"Current time: {time_result}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Run in background
+    loop = asyncio.get_event_loop()
+    loop.create_task(run_runtime())
+    loop.run_until_complete(example())
 ```
 
-### Using Server Registry
+## Troubleshooting
 
-For more complex setups with multiple server components:
+### Timezone Errors
 
-```python
-import asyncio
-from chuk_mcp_runtime.server.config_loader import load_config, find_project_root
-from chuk_mcp_runtime.server.server_registry import ServerRegistry
-from chuk_mcp_runtime.server.server import MCPServer
+If you encounter errors like `ZoneInfoNotFoundError: 'No time zone found with key BST'`, it's because the Python zoneinfo module is missing the required timezone data. To fix this:
 
-async def main():
-    # Load config
-    config = load_config()
-    
-    # Find project root
-    project_root = find_project_root()
-    
-    # Initialize server registry
-    server_registry = ServerRegistry(project_root, config)
-    
-    # Load server components
-    loaded_modules = server_registry.load_server_components()
-    
-    # Create and run server
-    server = MCPServer(config)
-    await server.serve()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+```bash
+# Install the tzdata package
+uv pip install tzdata
 ```
 
-## Configuration Options
+This is particularly important when working with the time server example.
 
-The configuration system supports the following settings:
+### Command-line Arguments
 
-### Host Configuration
-
-```yaml
-host:
-  name: "my-mcp-server"  # Server name
-  log_level: "INFO"      # Logging level (DEBUG, INFO, WARNING, ERROR)
+If you see errors like:
+```
+mcp-server-time: error: unrecognized arguments: --timezone America/New_York
 ```
 
-### Server Configuration
+Check that:
+1. You're using the correct parameter name (`--local-timezone` for the time server, not `--timezone`)
+2. Your command-line arguments are being passed correctly to the tool
 
-```yaml
-server:
-  type: "stdio"     # Server type (stdio, websocket)
-  host: "localhost" # For websocket server
-  port: 8080        # For websocket server
-```
+Two ways to pass arguments to the child process:
+```bash
+# Method 1: Using --args (everything after --args goes to the command)
+chuk-mcp-proxy --stdio time --command uvx --args mcp-server-time --local-timezone America/New_York
 
-### Logging Configuration
-
-```yaml
-logging:
-  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  reset_handlers: false
-  quiet_libraries: true
-```
-
-### Tool Configuration
-
-```yaml
-tools:
-  registry_module: "mcp_runtime.common.mcp_tool_decorator"
-  registry_attr: "TOOLS_REGISTRY"
-```
-
-### MCP Server Configurations
-
-```yaml
-mcp_servers:
-  example_server:
-    location: "servers/example_server"
-    enabled: true
-    tools:
-      module: "example_server.tools"
-      enabled: true
-    resources:
-      module: "example_server.resources"
-      enabled: true
-    prompts:
-      module: "example_server.prompts"
-      enabled: true
+# Method 2: Using -- (everything after -- goes to the command)
+chuk-mcp-proxy --stdio time --command uvx -- mcp-server-time --local-timezone America/New_York
 ```
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+MIT Licensemcp-proxy [OPTIONS]
+```
+
+Options:
+- `--config FILE`: YAML config file (optional, can be combined with flags below)
+- `--stdio NAME`: Add a local stdio MCP server (repeatable)
+- `--sse NAME`: Add a remote SSE MCP server (repeatable)
+- `--command CMD`: Executable for stdio servers (default: python)
+- `--cwd DIR`: Working directory for stdio server
+- `--args ...`: Additional args for the stdio command
+- `--url URL`: SSE base URL
+- `--api-key KEY`: SSE API key (or set API_KEY env var)
+- `--keep-aliases`: Keep single-dot aliases proxy.<tool>
+
+### chuk-mcp-server
+
+```
+chuk-mcp-server [CONFIG_PATH]
+```
+
+Options:
+- `CONFIG_PATH`: Path to configuration YAML (optional, defaults to searching common locations)
+- Environment variable: `CHUK_MCP_CONFIG_PATH` can be used instead of command-line argument
+
+## Using Proxy Tools Programmatically
+
+```python
+import asyncio
+from chuk_mcp_runtime.entry import run_runtime
+from chuk_mcp_runtime.common.mcp_tool_decorator import TOOLS_REGISTRY
+
+async def example():
+    # Access the proxied tool by its fully qualified name
+    time_tool = TOOLS_REGISTRY.get("proxy.time.get_current_time")
+    
+    # Call the tool
+    time_result = await time_tool(timezone="America/New_York")
+    
+    print(f"Current time: {time_result}")
+
+if __name__ == "__main__":
+    # Run in background
+    loop = asyncio.get_event_loop()
+    loop.create_task(run_runtime())
+    loop.run_until_complete(example())
+```
+
+## License
+
+MIT License

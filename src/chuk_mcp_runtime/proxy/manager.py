@@ -1,217 +1,212 @@
 """
 chuk_mcp_runtime.proxy.manager
-==============================
+================================
 
-Expose each remote MCP tool exactly once under
+Start/stop local or remote MCP side‑cars and expose their tools locally.
+Each remote tool appears exactly **once**:
 
-    proxy.<server>.<tool>
+• dot wrapper :  ``proxy.<server>.<tool>``  (internal)
+• underscore  :  ``<server>_<tool>``        (OpenAI‑style)
 
-Supports **stdio** (local process) **and** **SSE** (remote HTTP stream)
-transports as declared in *proxy_config.yaml*.
+Flags in the YAML ``proxy`` section drive the behaviour:
 
-Configuration extras
---------------------
+```yaml
 proxy:
-  enabled: true
-  namespace: proxy
-  keep_root_aliases: false   # ← if *true* the single-dot aliases
-                             #    proxy.<tool> are kept instead of pruned
+  enabled: true            # turn the feature on/off
+  namespace: proxy         # dot‑prefix for internal wrappers
+  openai_compatible: true  # build underscore aliases
+  keep_root_aliases: false # keep/destroy proxy.* aliases (when openai‑only)
+  only_openai_tools: false # expose *only* underscore aliases
+```
 """
-
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
-from chuk_mcp_runtime.common.errors import ServerError
+from chuk_mcp_runtime.common.mcp_tool_decorator import TOOLS_REGISTRY
+from chuk_mcp_runtime.common.openai_compatibility import (
+    create_openai_compatible_wrapper,
+    to_openai_compatible_name,
+)
 from chuk_mcp_runtime.proxy.tool_wrapper import create_proxy_tool
 from chuk_mcp_runtime.server.logging_config import get_logger
 
-from chuk_tool_processor.mcp import setup_mcp_stdio, setup_mcp_sse
-from chuk_tool_processor.registry import ToolRegistryProvider
-from chuk_tool_processor.models.tool_call import ToolCall
+try:
+    # Optional – only present if chuk‑tool‑processor is installed
+    from chuk_tool_processor.mcp import setup_mcp_stdio
+    from chuk_tool_processor.registry import ToolRegistryProvider
+except ModuleNotFoundError:  # type‑checking stubs
+
+    class ToolRegistryProvider:  # type: ignore
+        @staticmethod
+        def get_registry():
+            class _Dummy:
+                def list_tools(self):
+                    return []
+
+            return _Dummy()
 
 logger = get_logger("chuk_mcp_runtime.proxy")
 
+# ───────────────────────── helpers ──────────────────────────
 
+def to_openai_name(dotted: str) -> str:
+    """Historical helper (kept for backwards compatibility)."""
+    return to_openai_compatible_name(dotted.replace("proxy.", "", 1))
+
+
+# ───────────────────────── manager ──────────────────────────
 class ProxyServerManager:
-    # ───────────────────── construction / teardown ──────────────────────
-    def __init__(self, config: Dict[str, Any], project_root: str):
-        pxy = config.get("proxy", {})
+    """Boot the proxy layer and wire up tool wrappers."""
 
-        self.enabled            = pxy.get("enabled", False)
-        self.default_namespace  = pxy.get("namespace", "proxy")
-        self.keep_root_aliases  = pxy.get("keep_root_aliases", False)
-        self.project_root       = project_root
-        self.mcp_servers        = config.get("mcp_servers", {})
+    # ─────────────── construction / teardown ────────────────
+    def __init__(self, cfg: Dict[str, Any], project_root: str):
+        pxy = cfg.get("proxy", {})
+        self.enabled = pxy.get("enabled", False)
+        self.ns_root = pxy.get("namespace", "proxy")
+        self.keep_root_aliases = pxy.get("keep_root_aliases", False)
+        self.openai_mode = pxy.get("openai_compatible", False)
+        self.only_openai = pxy.get("only_openai_tools", False) and self.openai_mode
+        self.project_root = project_root
+        self.mcp_servers = cfg.get("mcp_servers", {})
 
-        self.tool_processor = self.stream_manager = None
-        self.running_servers: Dict[str, Dict[str, Any]] = {}
+        logger.setLevel(logging.DEBUG)
+        logger.debug(
+            "Proxy init – openai=%s | only_openai=%s | keep_root=%s",
+            self.openai_mode,
+            self.only_openai,
+            self.keep_root_aliases,
+        )
+
+        self.stream_manager = None
+        self.running: Dict[str, Dict[str, Any]] = {}
         self._tmp_cfg: tempfile.NamedTemporaryFile | None = None
+        self.openai_wrappers: Dict[str, Callable] = {}
 
-    # ───────────────────── server start / stop ──────────────────────────
+    # ─────────────────────── bootstrap / shutdown ───────────────────────
     async def start_servers(self) -> None:
         if not (self.enabled and self.mcp_servers):
-            logger.info("Proxy disabled or no servers configured")
+            logger.warning("Proxy disabled or no MCP servers configured")
             return
 
         stdio_cfg: Dict[str, Any] = {"mcpServers": {}}
-        stdio: list[str] = []
-        stdio_map: dict[int, str] = {}
-        sse_servers: list[dict[str, Any]] = []
-        sse_map: dict[int, str] = {}
+        stdio, stdio_map = [], {}
+        for name, opts in self.mcp_servers.items():
+            if opts.get("type", "stdio") != "stdio":
+                continue  # SSE not yet wired here
+            stdio.append(name)
+            stdio_map[len(stdio_map)] = name
+            cwd = opts.get("location") or ""
+            if cwd and not os.path.isabs(cwd):
+                cwd = os.path.join(self.project_root, cwd)
+            stdio_cfg["mcpServers"][name] = {
+                "command": opts.get("command", "python"),
+                "args": opts.get("args", []),
+                "cwd": cwd,
+            }
 
-        # ---- classify + build configs ----------------------------------
-        for idx, (name, opts) in enumerate(self.mcp_servers.items()):
-            if not opts.get("enabled", True):
-                continue
-            typ = opts.get("type", "stdio")
-
-            if typ == "stdio":
-                cwd = opts.get("location", "")
-                if cwd and not os.path.isabs(cwd):
-                    cwd = os.path.join(self.project_root, cwd)
-
-                stdio_cfg["mcpServers"][name] = {
-                    "command": opts.get("command", "python"),
-                    "args": opts.get("args", []),
-                    "cwd": cwd,
-                }
-                stdio.append(name)
-                stdio_map[len(stdio_map)] = name
-
-            elif typ == "sse":
-                sse_servers.append(
-                    {
-                        "name": name,
-                        "url": opts.get("url", ""),
-                        "api_key": opts.get("api_key", ""),
-                    }
-                )
-                sse_map[len(sse_map)] = name
-
-            else:
-                logger.warning("Unsupported server type '%s' for %s", typ, name)
-
-        if stdio:
-            # write temp json for setup_mcp_stdio
-            self._tmp_cfg = tempfile.NamedTemporaryFile(delete=False, mode="w")
-            json.dump(stdio_cfg, self._tmp_cfg)
-            self._tmp_cfg.flush()
-
-            self.tool_processor, self.stream_manager = await setup_mcp_stdio(
-                config_file=self._tmp_cfg.name,
-                servers=stdio,
-                server_names=stdio_map,
-                namespace=self.default_namespace,
-            )
-        elif sse_servers:
-            self.tool_processor, self.stream_manager = await setup_mcp_sse(
-                servers=sse_servers,
-                server_names=sse_map,
-                namespace=self.default_namespace,
-            )
-        else:
-            logger.error("No enabled MCP servers after filtering")
+        if not stdio:
+            logger.error("No stdio servers configured")
             return
 
-        # track running servers
-        for name in (*stdio, *(d["name"] for d in sse_servers)):
-            self.running_servers[name] = {"wrappers": {}}
+        # Write minimal config for tool‑processor stdio launcher
+        self._tmp_cfg = tempfile.NamedTemporaryFile(mode="w", delete=False)
+        json.dump(stdio_cfg, self._tmp_cfg)
+        self._tmp_cfg.flush()
+        _, self.stream_manager = await setup_mcp_stdio(
+            config_file=self._tmp_cfg.name,
+            servers=stdio,
+            server_names=stdio_map,
+            namespace=self.ns_root,
+        )
 
-        self._wrap_and_prune()
+        for srv in stdio:
+            self.running[srv] = {"wrappers": {}}
+
+        await self._discover_and_wrap()
 
     async def stop_servers(self) -> None:
         if self.stream_manager:
             await self.stream_manager.close()
-
         if self._tmp_cfg:
-            self._tmp_cfg.close()
-            os.unlink(self._tmp_cfg.name)
+            try:
+                os.unlink(self._tmp_cfg.name)
+            except OSError:
+                pass
 
-        self.running_servers.clear()
-        self.tool_processor = self.stream_manager = self._tmp_cfg = None
+    # ───────────────────── internal helpers ─────────────────────
+    async def _discover_and_wrap(self) -> None:
+        """Query each server, build dot‑wrappers and OpenAI aliases."""
+        if not self.stream_manager:
+            return
 
-    # ───────────────────────── helpers ────────────────────────────────
-    @staticmethod
-    def _del_nested(bucket: Dict, ns: str, name: str) -> None:
-        sub = bucket.get(ns)
-        if isinstance(sub, dict):
-            sub.pop(name, None)
-            if not sub:
-                bucket.pop(ns, None)
+        for server in self.running:
+            for meta in await self.stream_manager.list_tools(server):
+                tool_name = meta.get("name")
+                if not tool_name:
+                    continue
 
-    @staticmethod
-    def _prune(reg, ns: str, name: str) -> None:
-        """Remove (namespace, tool) from the ToolRegistryProvider."""
-        if hasattr(reg, "_tools"):
-            ProxyServerManager._del_nested(reg._tools, ns, name)  # type: ignore[attr-defined]
-        if hasattr(reg, "_metadata"):
-            ProxyServerManager._del_nested(reg._metadata, ns, name)  # type: ignore[attr-defined]
+                dotted_ns = f"{self.ns_root}.{server}"
+                dotted_full = f"{dotted_ns}.{tool_name}"
 
-    # ───────────────────── wrap + optional prune ──────────────────────
-    def _wrap_and_prune(self) -> None:
-        reg = ToolRegistryProvider.get_registry()
-        keep_prefix = f"{self.default_namespace}."
+                # ------------------------------------------------------------------
+                # 1) DOT‑NAME WRAPPER (internal + for OpenAI factory)                
+                # ------------------------------------------------------------------
+                wrapper = create_proxy_tool(
+                    dotted_ns,
+                    tool_name,
+                    self.stream_manager,
+                    meta,
+                    only_openai_tools=self.only_openai,
+                )
+                self.running[server]["wrappers"][tool_name] = wrapper
 
-        # 1) wrap every raw import proxy.<tool>
-        for ns, name in list(reg.list_tools()):
-            if ns != self.default_namespace:
-                continue  # not a raw import (already namespaced)
-            server = self.stream_manager.get_server_for_tool(name)
-            if not server:
-                logger.warning("Cannot map raw tool '%s' to server", name)
-                continue
+                # Drop from public registry if underscore‑only mode
+                if self.only_openai:
+                    TOOLS_REGISTRY.pop(dotted_full, None)
 
-            fq_ns = f"{keep_prefix}{server}"
-            meta = reg.get_metadata(name, self.default_namespace)
-            wrapper = create_proxy_tool(fq_ns, name, self.stream_manager, meta)
-            self.running_servers[server]["wrappers"][name] = wrapper
-            logger.debug("Wrapped %s.%s", fq_ns, name)
+                # ------------------------------------------------------------------
+                # 2) UNDERSCORE ALIAS (OpenAI‑style)                                 
+                # ------------------------------------------------------------------
+                if not self.openai_mode:
+                    continue
 
-        # 2) optionally prune single-dot aliases
-        if not self.keep_root_aliases:
-            for ns, name in list(reg.list_tools()):
-                if ns.startswith(keep_prefix):
-                    continue  # keep fully-qualified wrappers
-                self._prune(reg, ns, name)
-                logger.debug("Pruned alias %s.%s", ns, name)
+                under_name = to_openai_name(dotted_full)
+                if under_name in self.openai_wrappers:
+                    continue  # already done
 
-    # ───────────────────── public helpers ─────────────────────────────
-    async def process_text(self, text: str):
-        if not self.tool_processor:
-            raise ServerError("Proxy not running")
-        return await self.tool_processor.process_text(text)
+                alias = create_openai_compatible_wrapper(dotted_full, wrapper)
+                if alias is None:
+                    continue  # metadata missing
 
-    async def proxy_tool_call(self, ns: str, tool: str, args: Dict[str, Any]):
-        if not self.tool_processor:
-            raise ServerError("Proxy not running")
+                TOOLS_REGISTRY[under_name] = alias
+                self.openai_wrappers[under_name] = alias
+                logger.debug("Registered underscore wrapper: %s", under_name)
 
-        call = ToolCall(tool=f"{ns}.{tool}", arguments=args)
-        for meth in (
-            "run_tool_calls",
-            "run_calls",
-            "process_tool_calls",
-            "execute_calls",
-            "process_calls",
-        ):
-            if hasattr(self.tool_processor, meth):
-                res = await getattr(self.tool_processor, meth)([call])
-                break
-        else:
-            raise ServerError("ToolProcessor lacks compatible call method")
+        # Diagnostics ---------------------------------------------------
+        dot = [k for k in TOOLS_REGISTRY if "." in k and "_" not in k]
+        under = [k for k in TOOLS_REGISTRY if "_" in k and "." not in k]
+        logger.debug("Registry overview – dot: %d | under: %d", len(dot), len(under))
 
-        first = res[0]
-        if getattr(first, "error", None):
-            raise ServerError(first.error)
-        return first.result
+    # ───────────────────── public helpers ─────────────────────────
+    def get_all_tools(self) -> Dict[str, Callable]:
+        """Return all publicly exposed tools respecting config flags."""
+        exposed: Dict[str, Callable] = dict(self.openai_wrappers)
+        if not self.only_openai:
+            for srv, info in self.running.items():
+                for t_name, fn in info["wrappers"].items():
+                    exposed[f"{self.ns_root}.{srv}.{t_name}"] = fn
+        return exposed
 
-    def get_all_tools(self) -> Dict[str, Any]:
-        """Return mapping *fully-qualified tool name* → *wrapper function*."""
-        return {
-            f"{self.default_namespace}.{srv}.{name}": fn
-            for srv, inf in self.running_servers.items()
-            for name, fn in inf["wrappers"].items()
-        }
+    async def call_tool(self, name: str, **kw):
+        """Convenience helper: call a tool by public name."""
+        if "_" in name and "." not in name:  # convert underscore → dot
+            server, tool = name.split("_", 1)
+            name = f"{self.ns_root}.{server}.{tool}"
+        srv = name.split(".")[1]
+        tool = name.split(".")[-1]
+        return await self.stream_manager.call_tool(tool, kw, srv)  # type: ignore[arg-type]

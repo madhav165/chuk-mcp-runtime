@@ -1,0 +1,21 @@
+# stdio_proxy_config.yaml
+proxy:
+  enabled: true
+  namespace: "proxy"
+  openai_compatible: false  # Enable OpenAI compatibility
+  keep_root_aliases: false  # Keep both formats availabl
+  only_openai_tools: false
+
+mcp_servers:
+  # time:
+  #   type: "stdio"
+  #   command: "uvx"
+  #   args: ["mcp-server-time", "--local-timezone", "America/New_York"]
+  time2:
+    type: "stdio"
+    command: "uv"
+    args: ["--directory", "/Users/christopherhay/chris-source/chuk-mcp-servers/chuk-mcp-time-server", "run", "src/chuk_mcp_time_server/main.py"]
+  echo2:
+    type: "stdio"
+    command: "uv"
+    args: ["--directory", "/Users/christopherhay/chris-source/chuk-mcp-servers/chuk-mcp-echo-server", "run", "src/chuk_mcp_echo_server/main.py"]

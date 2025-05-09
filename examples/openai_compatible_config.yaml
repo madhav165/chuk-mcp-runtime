@@ -1,0 +1,18 @@
+# examples/openai_only_config.yaml
+proxy:
+  enabled: true
+  namespace: "proxy"
+  openai_compatible: true   # Enable OpenAI compatibility
+  only_openai_tools: true   # Only register underscore-notation tools
+  keep_root_aliases: false  # Don't keep single-dot aliases
+
+mcp_servers:
+  time:
+    type: "stdio"
+    command: "uvx"
+    args: ["mcp-server-time", "--local-timezone", "America/New_York"]
+    
+  echo:
+    type: "stdio" 
+    command: "python"
+    args: ["examples/echo_server/main.py"]

@@ -35,6 +35,13 @@ def load_config(config_paths=None, default_config=None):
                 "registry_module": "chuk_mcp_runtime.common.mcp_tool_decorator",
                 "registry_attr": "TOOLS_REGISTRY"
             },
+            "proxy": {
+                "enabled": False,
+                "namespace": "proxy",
+                "keep_root_aliases": False,
+                "openai_compatible": False,
+                "only_openai_tools": False
+            },
             "mcp_servers": {}
         }
     
@@ -55,8 +62,21 @@ def load_config(config_paths=None, default_config=None):
             try:
                 with open(path, 'r') as f:
                     file_config = yaml.safe_load(f) or {}
-                    # Merge file_config into default_config (shallow merge for now)
+                    
+                    # Deep merge of proxy section (if it exists in both)
+                    if 'proxy' in file_config and 'proxy' in default_config:
+                        for key, value in file_config['proxy'].items():
+                            default_config['proxy'][key] = value
+                        # Remove from file_config to avoid duplication
+                        del file_config['proxy']
+                        
+                    # Now do the regular update for the rest of the config
                     default_config.update(file_config)
+                    
+                    # Ensure only_openai_tools is false if openai_compatible is false
+                    if not default_config.get('proxy', {}).get('openai_compatible', False):
+                        default_config['proxy']['only_openai_tools'] = False
+                        
                     return default_config
             except Exception as e:
                 # Log warning but continue trying

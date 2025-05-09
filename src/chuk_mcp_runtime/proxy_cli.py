@@ -1,0 +1,183 @@
+#!/usr/bin/env python
+# chuk_mcp_runtime/proxy_cli.py
+"""
+proxy_cli.py - start the CHUK proxy with YAML, CLI args, or both.
+
+Usage examples
+--------------
+# 1) YAML only
+chuk-mcp-proxy --config examples/proxy_config.yaml
+
+# 2) Args only (local stdio echo server)
+chuk-mcp-proxy --stdio echo2 --cwd /src/echo \
+               --command uv --args run src/chuk_mcp_echo_server/main.py
+
+# 3) YAML + override (add remote weather SSE)
+chuk-mcp-proxy --config proxy_config.yaml \
+               --sse weather --url https://api.example.com/sse/weather \
+               --api-key $WEATHER_KEY
+
+# 4) Enable OpenAI compatibility
+chuk-mcp-proxy --config proxy_config.yaml --openai-compatible
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import os
+import sys
+from pathlib import Path
+from typing import Any, Dict
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from chuk_mcp_runtime.proxy.manager import ProxyServerManager
+from chuk_mcp_runtime.server.config_loader import load_config
+from chuk_mcp_runtime.server.logging_config import configure_logging
+
+# ─────────────────────────── CLI parsing ────────────────────────────
+
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Launch the CHUK proxy layer.")
+    p.add_argument(
+        "--config",
+        metavar="FILE",
+        help="YAML config file (optional – can be combined with flags below)",
+    )
+
+    # declare servers
+    p.add_argument("--stdio", action="append", metavar="NAME",
+                   help="add a local stdio MCP server (repeatable)")
+    p.add_argument("--sse", action="append", metavar="NAME",
+                   help="add a remote SSE MCP server (repeatable)")
+
+    # stdio options
+    p.add_argument("--command", default="python",
+                   help="executable for stdio servers (default: python)")
+    p.add_argument("--cwd", default="", help="working directory for stdio server")
+    p.add_argument("--args", nargs=argparse.REMAINDER,
+                   help="additional args for the stdio command")
+
+    # sse options
+    p.add_argument("--url", help="SSE base URL")
+    p.add_argument("--api-key", help="SSE API key (or set API_KEY env var)")
+
+    # proxy options
+    p.add_argument("--keep-aliases", action="store_true",
+                   help="keep single-dot aliases proxy.<tool>")
+    p.add_argument("--openai-compatible", action="store_true",
+                   help="generate OpenAI-compatible tool names (with underscores instead of dots)")
+
+    return p.parse_args()
+
+
+# ───────────────────── config helpers ───────────────────────────────
+
+
+def _empty_config() -> Dict[str, Any]:
+    return {
+        "proxy": {
+            "enabled": True,
+            "namespace": "proxy",
+            "keep_root_aliases": False,
+            "openai_compatible": False,  # Default to false for backward compatibility
+        },
+        "mcp_servers": {},
+    }
+
+
+def _merge_yaml(path: Path | None) -> Dict[str, Any]:
+    if not path:
+        return _empty_config()
+
+    if not path.exists():
+        sys.exit(f"⚠️  Config file not found: {path}")
+
+    # Re-use the library loader so includes/defaults still work.
+    return load_config([str(path)])
+
+
+def _inject_stdio(cfg: Dict[str, Any], name: str, ns: argparse.Namespace) -> None:
+    cfg["mcp_servers"][name] = {
+        "enabled": True,
+        "type": "stdio",
+        "location": ns.cwd,
+        "command": ns.command,
+        "args": ns.args or [],
+    }
+
+
+def _inject_sse(cfg: Dict[str, Any], name: str, ns: argparse.Namespace) -> None:
+    cfg["mcp_servers"][name] = {
+        "enabled": True,
+        "type": "sse",
+        "url": ns.url,
+        "api_key": ns.api_key or os.getenv("API_KEY", ""),
+    }
+
+
+# ─────────────────────────── async core ─────────────────────────────
+
+
+async def _async_main() -> None:
+    args = _parse_args()
+
+    # 1) YAML baseline (or empty)
+    cfg = _merge_yaml(Path(args.config) if args.config else None)
+
+    # 2) CLI overrides / additions
+    cfg["proxy"]["keep_root_aliases"] = args.keep_aliases
+    cfg["proxy"]["openai_compatible"] = args.openai_compatible
+
+    for name in args.stdio or []:
+        _inject_stdio(cfg, name, args)
+    for name in args.sse or []:
+        _inject_sse(cfg, name, args)
+
+    # 3) logging
+    configure_logging(cfg)
+
+    # 4) start proxy layer
+    proxy = ProxyServerManager(cfg, project_root=str(ROOT))
+    await proxy.start_servers()
+
+    try:
+        print("Running servers :", ", ".join(proxy.running_servers) or "— none —")
+        tools = proxy.get_all_tools()
+        print("Wrapped tools   :", ", ".join(tools) or "— none —")
+
+        # tiny smoke-test if at least one tool exists
+        if tools:
+            first_tool = next(iter(tools.values()))
+            res = await first_tool(message="Hello from proxy_cli!")
+            print("Smoke-test call :", res)
+
+        # block forever until Ctrl-C
+        await asyncio.Event().wait()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        await proxy.stop_servers()
+        print("Proxy shut down.")
+
+
+# ────────────────────────── sync wrapper ────────────────────────────
+
+
+def cli() -> None:
+    """Console-script entry-point – runs the async core."""
+    try:
+        asyncio.run(_async_main())
+    except KeyboardInterrupt:
+        # _async_main handles the first Ctrl-C already;
+        # this is only reached on a second interrupt.
+        pass
+
+
+# Support `python proxy_cli.py …` for local testing
+if __name__ == "__main__":
+    cli()
