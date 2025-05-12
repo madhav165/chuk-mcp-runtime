@@ -1,9 +1,8 @@
 """
 OpenAI API Compatibility Module for CHUK MCP Runtime
 
-This version builds **underscore‑style** wrappers whose *Python signatures*
-match the remote tool schema so front‑ends (and OpenAI) always see the right
-parameters.
+This version leverages the async capabilities while maintaining compatibility
+with the original approach of using _mcp_tool attributes.
 """
 from __future__ import annotations
 
@@ -12,9 +11,10 @@ import copy
 import inspect
 import logging
 import re
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from chuk_mcp_runtime.common.mcp_tool_decorator import TOOLS_REGISTRY, Tool
+from chuk_tool_processor.registry import ToolRegistryProvider
 
 logger = logging.getLogger("chuk_mcp_runtime.common.openai_compatibility")
 logger.addHandler(logging.NullHandler())
@@ -77,7 +77,7 @@ async def _alias({arg_sig}):
 
 # ─────────────────── public wrapper builder ─────────────────────
 
-def create_openai_compatible_wrapper(original_name: str, original_func: Callable) -> Optional[Callable]:
+async def create_openai_compatible_wrapper(original_name: str, original_func: Callable) -> Optional[Callable]:
     """Return a wrapper with an OpenAI‑safe name *and* real signature."""
 
     # Priority 1: metadata from remote MCP list‑tools
@@ -99,7 +99,7 @@ def create_openai_compatible_wrapper(original_name: str, original_func: Callable
     if "properties" not in schema and isinstance(schema, dict):
         schema = {"type": "object", "properties": schema, "required": schema.get("required", [])}
 
-        # Strip leading "proxy." if present to avoid redundant prefix
+    # Strip leading "proxy." if present to avoid redundant prefix
     clean_name = original_name.replace("proxy.", "", 1)
     alias_name = to_openai_compatible_name(clean_name)
     alias_fn = _build_wrapper_from_schema(alias_name=alias_name, target=original_func, schema=schema)
@@ -109,11 +109,11 @@ def create_openai_compatible_wrapper(original_name: str, original_func: Callable
 
     return alias_fn
 
-# ─────────────────── adapter class (unchanged API) ─────────────
+# ─────────────────── adapter class (async version) ─────────────
 class OpenAIToolsAdapter:
     """Expose registry in an OpenAI‑friendly way and allow execution."""
 
-    def __init__(self, registry: Optional[Dict[str, Callable]] = None):
+    def __init__(self, registry: Optional[Dict[str, Any]] = None):
         self.registry = registry or TOOLS_REGISTRY
         self.openai_to_original: Dict[str, str] = {}
         self.original_to_openai: Dict[str, str] = {}
@@ -129,55 +129,175 @@ class OpenAIToolsAdapter:
             self.openai_to_original[openai_name] = original
             self.original_to_openai[original] = openai_name
 
-    # ---------- wrapper registration -------------------------------- --------------------------------
-    def register_openai_compatible_wrappers(self):
+    # ---------- wrapper registration --------------------------------
+    async def register_openai_compatible_wrappers(self):
+        """Register OpenAI-compatible wrappers for all tools with dots in their names."""
+        # Register dot-named tools from TOOLS_REGISTRY
         for o, fn in list(self.registry.items()):
             if "." not in o or o in self.original_to_openai.values():
                 continue
             if to_openai_compatible_name(o) in self.registry:
                 continue
-            w = create_openai_compatible_wrapper(o, fn)
+            w = await create_openai_compatible_wrapper(o, fn)
             if w is None:
                 continue
             self.registry[w._mcp_tool.name] = w  # type: ignore[attr-defined]
             logger.debug("Registered OpenAI wrapper: %s → %s", w._mcp_tool.name, o)
+            
+        # Also register tools from the registry
+        registry = await ToolRegistryProvider.get_registry()
+        tools_list = await registry.list_tools()
+        
+        for namespace, name in tools_list:
+            # Skip tools that are already proxied
+            if namespace.startswith("proxy.") and "." in namespace:
+                continue
+                
+            # Create the fully qualified name and check if we already have it
+            fq_name = f"{namespace}.{name}" if namespace else name
+            openai_name = to_openai_compatible_name(fq_name)
+            
+            if openai_name in self.registry:
+                continue
+                
+            try:
+                # Get the tool and metadata
+                tool_class = await registry.get_tool(name, namespace)
+                metadata = await registry.get_metadata(name, namespace)
+                
+                if tool_class and metadata:
+                    # Create a wrapper function that delegates to the tool class
+                    async def execute_wrapper(**kwargs):
+                        instance = tool_class()
+                        result = instance.execute(**kwargs)
+                        if inspect.isawaitable(result):
+                            return await result
+                        return result
+                    
+                    # Get or create a schema
+                    description = getattr(metadata, "description", f"Tool: {name}")
+                    input_schema = getattr(metadata, "input_schema", {})
+                    if not input_schema:
+                        input_schema = {"type": "object", "properties": {}, "required": []}
+                        
+                    # Create a Tool metadata object
+                    tool_meta = Tool(
+                        name=openai_name,
+                        description=description.strip().replace("\n", " "),
+                        inputSchema=input_schema
+                    )
+                    
+                    # Attach metadata
+                    execute_wrapper._mcp_tool = tool_meta  # type: ignore[attr-defined]
+                    
+                    # Register in TOOLS_REGISTRY
+                    self.registry[openai_name] = execute_wrapper
+                    logger.debug(f"Registered class-based tool wrapper: {openai_name} → {fq_name}")
+                    
+            except Exception as e:
+                logger.warning(f"Error registering tool {namespace}.{name}: {e}")
+            
+        # Rebuild maps after registration
+        self._build_maps()
 
     # ---------- schema export ---------------------------------------
-    def get_openai_tools_definition(self) -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
-        for n, fn in self.registry.items():
-            if "." in n or not hasattr(fn, "_mcp_tool"):
+    async def get_openai_tools_definition(self) -> List[Dict[str, Any]]:
+        """
+        Get OpenAI tools definition, prioritizing proxy tools and filtering duplicates.
+        
+        This method identifies unique tools by their base functionality
+        and returns only the most feature-rich version of each tool.
+        """
+        # First, identify all tools and group them by their core functionality
+        # We'll remove the server prefix to identify the actual function
+        tool_groups: Dict[str, List[tuple[str, Any]]] = {}
+        
+        # Process all tools from TOOLS_REGISTRY with _mcp_tool attribute
+        for name, fn in self.registry.items():
+            if not hasattr(fn, "_mcp_tool"):
                 continue
-            meta = fn._mcp_tool  # type: ignore[attr-defined]
-            out.append({
-                "type": "function",
-                "function": {
-                    "name": n,
-                    "description": meta.description,
-                    "parameters": meta.inputSchema,
-                },
-            })
+                
+            # Extract the base tool name (without server or prefix)
+            base_name = name
+            if "_" in name:
+                parts = name.split("_", 1)
+                if len(parts) == 2:
+                    server, tool = parts
+                    base_name = tool
+            
+            # Group tools by their base functionality
+            if base_name not in tool_groups:
+                tool_groups[base_name] = []
+            tool_groups[base_name].append((name, fn))
+        
+        # Now, select only the most feature-rich version of each tool
+        out: List[Dict[str, Any]] = []
+        for base_name, tools in tool_groups.items():
+            # Sort by the number of properties in the schema (most first)
+            # For ties, prioritize tools with "time_" prefix over "default_proxy_" prefix
+            def sort_key(tool_tuple):
+                name, fn = tool_tuple
+                prop_count = len(fn._mcp_tool.inputSchema.get("properties", {}))
+                # Prioritize server-specific tools (like time_*) over proxy tools
+                prefix_priority = 0
+                if name.startswith("default_proxy_"):
+                    prefix_priority = -1
+                elif "proxy_" in name:
+                    prefix_priority = -2
+                return (prop_count, prefix_priority)
+                
+            sorted_tools = sorted(tools, key=sort_key, reverse=True)
+            
+            if sorted_tools:
+                # Take only the best tool for each base functionality
+                name, fn = sorted_tools[0]
+                meta = fn._mcp_tool
+                
+                out.append({
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": meta.description,
+                        "parameters": meta.inputSchema,
+                    }
+                })
+        
         return out
 
     # ---------- execution wrapper -----------------------------------
     async def execute_tool(self, name: str, **kw):
+        """Execute a tool by name with the given kwargs."""
         fn = self.registry.get(name) or self.registry.get(self.openai_to_original.get(name, ""))
         if fn is None:
             raise ValueError(f"Tool not found: {name}")
-        res = fn(**kw)
-        if asyncio.iscoroutine(res):
-            res = await res
-        return res
+            
+        # Handle both function and class-based tools
+        if inspect.isclass(fn):
+            # Create an instance and call execute
+            instance = fn()
+            result = instance.execute(**kw)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        else:
+            # Call function directly
+            res = fn(**kw)
+            if asyncio.iscoroutine(res):
+                res = await res
+            return res
 
     # ---------- translate -------------------------------------------
     def translate_name(self, name: str, to_openai: bool = True) -> str:
+        """Translate between original and OpenAI-compatible names."""
         if to_openai:
             return self.original_to_openai.get(name, to_openai_compatible_name(name))
         return self.openai_to_original.get(name, from_openai_compatible_name(name))
 
 
+# Create a global adapter instance
 adapter = OpenAIToolsAdapter()
 
-def initialize_openai_compatibility():
-    adapter.register_openai_compatible_wrappers()
+async def initialize_openai_compatibility():
+    """Initialize OpenAI compatibility by registering wrappers."""
+    await adapter.register_openai_compatible_wrappers()
     return adapter

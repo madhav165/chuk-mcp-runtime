@@ -43,14 +43,14 @@ mcp_servers:
     enabled: true
     type: stdio
     # Directory containing the echo server; “uv” will run from here
-    location: /Users/christopherhay/chris-source/chuk-mcp-servers/chuk-mcp-echo-server
+    location: /Users/chrishay/chris-source/mcp-advantage/mcp-echo-server
     # The launcher command (uv) and its arguments
     command: uv
     args:
       - --directory
-      - /Users/christopherhay/chris-source/chuk-mcp-servers/chuk-mcp-echo-server
+      - /Users/chrishay/chris-source/mcp-advantage/mcp-echo-server
       - run
-      - src/chuk_mcp_echo_server/main.py
+      - src/mcp_echo_server/main.py
 
   # # 2) Local “math” demo server (stdio)
   # math:

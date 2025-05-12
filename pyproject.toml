@@ -18,7 +18,7 @@ classifiers = [
 ]
 
 dependencies = [
-  "chuk-tool-processor>=0.1.6",
+  "chuk-tool-processor>=0.1.7",
   "mcp>=1.6.0",
   "pydantic>=2.10.6",
   "pyyaml>=6.0.2",

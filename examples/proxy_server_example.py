@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 # examples/proxy_server_example.py
-#!/usr/bin/env python
 """
 examples/proxy_server_example.py
 --------------------------------
@@ -25,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 # ── project paths ----------------------------------------------------
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -45,13 +44,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_YAML = os.path.join(HERE, "proxy_config.yaml")
 
 
-def group_registry() -> Dict[str, List[str]]:
+async def group_registry() -> Dict[str, List[str]]:
     """Return registry grouped by namespace (if the provider is present)."""
     grouped: Dict[str, List[str]] = {}
     if not ToolRegistryProvider:
         return grouped
 
-    for ns, name in ToolRegistryProvider.get_registry().list_tools():
+    # Get the registry using the async API
+    registry = await ToolRegistryProvider.get_registry()
+    
+    # List tools using the async API
+    tools_list: List[Tuple[str, str]] = await registry.list_tools()
+    
+    for ns, name in tools_list:
         grouped.setdefault(ns or "(no-ns)", []).append(name)
 
     for tools in grouped.values():
@@ -70,7 +75,7 @@ async def main() -> None:
 
     try:
         # 3) dump registry --------------------------------------------
-        grouped = group_registry()
+        grouped = await group_registry()
         print("\n=== Registry grouped by namespace ===")
         if grouped:
             for ns, names in grouped.items():
@@ -81,7 +86,7 @@ async def main() -> None:
             print("(ToolRegistryProvider not installed)")
 
         # 4) call wrapper directly ------------------------------------
-        wrappers = proxy.get_all_tools()
+        wrappers = await proxy.get_all_tools()  # Make this async
         dot_name = "proxy.echo2.echo"
         if dot_name not in wrappers:
             raise RuntimeError(

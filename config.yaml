@@ -1,4 +1,4 @@
-# stdio_proxy_config.yaml
+# config.yaml
 proxy:
   enabled: true
   namespace: "proxy"
@@ -21,6 +21,6 @@ mcp_servers:
     command: "uv"
     args:
       - --directory
-      - /Users/christopherhay/chris-source/chuk-mcp-servers/chuk-mcp-echo-server
+      - /Users/chrishay/chris-source/mcp-advantage/mcp-echo-server
       - run
-      - src/chuk_mcp_echo_server/main.py
+      - src/mcp_echo_server/main.py
