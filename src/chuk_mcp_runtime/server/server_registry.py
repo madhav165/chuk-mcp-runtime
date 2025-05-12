@@ -1,6 +1,6 @@
 # chuk_mcp_runtime/server/server_registry.py
 """
-Server Registry Module for CHUK MCP Tool Servers
+Server Registry Module for CHUK MCP Tool Servers - Async Native Implementation
 
 This module provides a ServerRegistry class for managing 
 CHUK MCP tool servers and their components.
@@ -8,10 +8,12 @@ CHUK MCP tool servers and their components.
 import os
 import sys
 import importlib
-from typing import List, Dict, Any, Tuple, Optional
+import asyncio
+from typing import List, Dict, Any, Tuple, Optional, Set
 
 # get the logger
 from chuk_mcp_runtime.server.logging_config import get_logger
+from chuk_mcp_runtime.common.mcp_tool_decorator import scan_for_tools
 
 class ServerRegistry:
     """Registry for managing MCP tool servers with components"""
@@ -153,13 +155,17 @@ class ServerRegistry:
                 self.logger.debug(f"Adding {path} to sys.path")
                 sys.path.insert(0, path)
     
-    def load_server_components(self) -> Dict[str, Any]:
+    async def load_server_components(self) -> Dict[str, Any]:
         """
         Load all enabled components from configured servers.
         
         Returns:
             Dictionary of loaded modules.
         """
+        # Set to track tool modules for scanning
+        tool_modules: Set[str] = set()
+        
+        # Process each server and its components
         for server_name, server_components in self.components.items():
             for component in server_components:
                 module_name = component["module"]
@@ -175,13 +181,24 @@ class ServerRegistry:
                 try:
                     self.logger.debug(f"Loading {component_type} from {module_name}" + 
                                    (" (auto-discovered)" if auto_discovered else ""))
+                    
+                    # Import the module
                     self.loaded_modules[module_name] = importlib.import_module(module_name)
+                    
+                    # If it's a tools component, add to the scan list
+                    if component_type == "tools":
+                        tool_modules.add(module_name)
+                        
                 except ImportError as e:
                     # If it's for testing, we'll catch the import error but not raise it
                     if auto_discovered:
                         self.logger.debug(f"Auto-discovered module {module_name} not found: {e}")
                     else:
                         self.logger.warning(f"Failed to import {module_name}: {e}")
+        
+        # Scan for tools in any tool modules
+        if tool_modules:
+            await scan_for_tools(list(tool_modules))
         
         return self.loaded_modules
         

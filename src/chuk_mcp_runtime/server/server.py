@@ -1,7 +1,6 @@
-# chuk_mcp_runtime/server.py
-# -*- coding: utf-8 -*-
+# chuk_mcp_runtime/server/server.py
 """
-CHUK MCP Server Module
+CHUK MCP Server Module - Async Native Implementation
 
 This module provides the core CHUK MCP server functionality for 
 running tools and managing server operations.
@@ -19,6 +18,7 @@ from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource
 
 # Local imports
 from chuk_mcp_runtime.server.logging_config import get_logger
+from chuk_mcp_runtime.common.mcp_tool_decorator import TOOLS_REGISTRY, initialize_tool_registry
 
 
 class MCPServer:
@@ -48,9 +48,9 @@ class MCPServer:
         self.server_name = config.get("host", {}).get("name", "generic-mcp")
         
         # Tools registry
-        self.tools_registry = tools_registry or self._import_tools_registry()
+        self.tools_registry = tools_registry or TOOLS_REGISTRY
     
-    def _import_tools_registry(self) -> Dict[str, Callable]:
+    async def _import_tools_registry(self) -> Dict[str, Callable]:
         """
         Dynamically import the tools registry.
         
@@ -73,6 +73,10 @@ class MCPServer:
         try:
             tools_decorator_module = importlib.import_module(registry_module_path)
             tools_registry = getattr(tools_decorator_module, registry_attr, {})
+            
+            # Initialize any tools that need it
+            if hasattr(tools_decorator_module, 'initialize_tool_registry'):
+                await tools_decorator_module.initialize_tool_registry()
         except (ImportError, AttributeError) as e:
             self.logger.error(
                 f"Failed to import TOOLS_REGISTRY from {registry_module_path}: {e}"
@@ -96,6 +100,13 @@ class MCPServer:
         Args:
             custom_handlers: Optional dictionary of custom handlers to add to the server.
         """
+        # Ensure tools registry is initialized
+        if not self.tools_registry:
+            self.tools_registry = await self._import_tools_registry()
+        
+        # Initialize any tool placeholders
+        await initialize_tool_registry()
+            
         server = Server(self.server_name)
 
         @server.list_tools()
@@ -141,14 +152,10 @@ class MCPServer:
             try:
                 self.logger.debug(f"Executing tool '{name}' with arguments: {arguments}")
                 
-                # 1) Call the tool; it may return a coroutine
-                result = func(**arguments)
+                # Execute the tool (should always be async)
+                result = await func(**arguments)
                 
-                # 2) If it's awaitable (a coroutine), await it here
-                if inspect.isawaitable(result):
-                    result = await result
-                
-                # 3) If result is already content objects, return as is
+                # If result is already content objects, return as is
                 if (
                     isinstance(result, list)
                     and all(
@@ -158,11 +165,11 @@ class MCPServer:
                 ):
                     return result
                 
-                # 4) If it's a simple string, wrap in TextContent
+                # If it's a simple string, wrap in TextContent
                 if isinstance(result, str):
                     return [TextContent(type="text", text=result)]
                 
-                # 5) Otherwise, serialize to JSON and wrap
+                # Otherwise, serialize to JSON and wrap
                 return [
                     TextContent(
                         type="text",
@@ -197,7 +204,7 @@ class MCPServer:
         else:
             raise ValueError(f"Unknown server type: {server_type}")
 
-    def register_tool(self, name: str, func: Callable) -> None:
+    async def register_tool(self, name: str, func: Callable) -> None:
         """
         Register a tool function with the server.
         
@@ -212,7 +219,7 @@ class MCPServer:
         self.tools_registry[name] = func
         self.logger.debug(f"Registered tool: {name}")
         
-    def get_tool_names(self) -> List[str]:
+    async def get_tool_names(self) -> List[str]:
         """
         Get names of all registered tools.
         

@@ -5,6 +5,8 @@ examples/openai_compatibility_demo.py
 
 Minimal, deterministic demo of ProxyServerManager *in OpenAI-only mode*.
 
+Fully async-native implementation that maintains compatibility with the original.
+
 Run:
 
     uv run examples/openai_compatibility_demo.py --only-openai-tools

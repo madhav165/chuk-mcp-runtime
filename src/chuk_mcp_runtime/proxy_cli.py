@@ -5,6 +5,7 @@ proxy_cli.py
 ============
 
 Launch the CHUK proxy layer from a YAML file, CLI arguments, or both.
+Fully async-native implementation.
 
 Examples
 --------
@@ -137,12 +138,13 @@ async def _async_main() -> None:
         running = ", ".join(proxy.running.keys()) or "— none —"
         print("Running servers :", running)
 
-        tools = proxy.get_all_tools()
+        tools = await proxy.get_all_tools()
         print("Wrapped tools   :", ", ".join(tools) or "— none —")
 
         # quick smoke-test
         if tools:
-            first_tool = next(iter(tools.values()))
+            first_tool_name = next(iter(tools))
+            first_tool = tools[first_tool_name]
             res = await first_tool(message="Hello from proxy_cli!")
             print("Smoke-test call :", res)
 

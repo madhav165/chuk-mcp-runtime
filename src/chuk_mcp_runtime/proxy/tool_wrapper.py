@@ -4,6 +4,7 @@ chuk_mcp_runtime.proxy.tool_wrapper
 ===================================
 
 Create local async wrappers for every remote MCP tool.
+Fully async-native implementation.
 
  • dot wrapper … proxy.<server>.<tool>
  • underscore …  <server>_<tool>  (OpenAI-style)
@@ -35,46 +36,36 @@ def _meta_get(meta: Any, key: str, default: Any) -> Any:
     return meta.get(key, default) if isinstance(meta, dict) else getattr(meta, key, default)
 
 
-def _tp_register(
+async def _tp_register(
     registry: Any,
     *,
     name: str,
     namespace: str,
-    func: Callable[..., Any],
+    tool: Callable[..., Any],
     metadata: Any,
 ) -> None:
     """
-    Register *func* with ToolRegistryProvider **only if** the provider exposes
-    the modern keyword API (`func=…`).  Legacy positional APIs vary across
-    versions and can mis-order arguments; skipping them prevents Pydantic
-    validation errors while the proxy still works via TOOLS_REGISTRY.
+    Register *tool* with ToolRegistryProvider.
+    
+    Uses the correct parameter names based on inspection of the registry.
     """
     if not hasattr(registry, "register_tool"):
         return
 
-    sig = inspect.signature(registry.register_tool)          # type: ignore[attr-defined]
-    if "func" not in sig.parameters:                         # legacy positional → skip
-        return
-
-    # make metadata hash-friendly
-    if isinstance(metadata, (dict, list, set)):
-        try:
-            metadata = json.dumps(metadata, sort_keys=True)
-        except Exception:
-            metadata = str(metadata)
-
     try:
-        registry.register_tool(                              # keyword API
-            func=func,
+        # Use the correct parameter name 'tool' instead of 'func'
+        await registry.register_tool(
+            tool=tool,
             name=name,
             namespace=namespace,
             metadata=metadata,
         )
-    except Exception as exc:                                 # noqa: BLE001
+        logger.debug(f"Successfully registered tool {namespace}.{name} with registry")
+    except Exception as exc:
         logger.debug("ToolRegistryProvider.register_tool failed: %s", exc)
 
 # ───────────────────────── factory ──────────────────────────
-def create_proxy_tool(
+async def create_proxy_tool(
     namespace: str,               # e.g. "proxy.time"
     tool_name: str,               # e.g. "get_current_time"
     stream_manager: Any,
@@ -111,11 +102,12 @@ def create_proxy_tool(
 
     # optional ToolRegistryProvider registration (safe version)
     if ToolRegistryProvider is not None:
-        _tp_register(
-            ToolRegistryProvider.get_registry(),
+        registry = await ToolRegistryProvider.get_registry()
+        await _tp_register(
+            registry,
             name=tool_name,
             namespace=namespace,
-            func=_proxy_wrapper,
+            tool=_proxy_wrapper,  # Use 'tool' instead of 'func'
             metadata=metadata,
         )
 

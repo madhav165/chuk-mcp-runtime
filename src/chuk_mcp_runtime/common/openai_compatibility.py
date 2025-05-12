@@ -1,8 +1,9 @@
+# chuk_mcp_runtime/common/openai_compatibility.py
 """
-OpenAI API Compatibility Module for CHUK MCP Runtime
+OpenAI API Compatibility Module for CHUK MCP Runtime - Async Native Implementation
 
-This version leverages the async capabilities while maintaining compatibility
-with the original approach of using _mcp_tool attributes.
+This module provides functions to create OpenAI-compatible tool wrappers
+for CHUK MCP tools, leveraging the async capabilities of the runtime.
 """
 from __future__ import annotations
 
@@ -14,10 +15,9 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from chuk_mcp_runtime.common.mcp_tool_decorator import TOOLS_REGISTRY, Tool
-from chuk_tool_processor.registry import ToolRegistryProvider
+from chuk_mcp_runtime.server.logging_config import get_logger
 
-logger = logging.getLogger("chuk_mcp_runtime.common.openai_compatibility")
-logger.addHandler(logging.NullHandler())
+logger = get_logger("chuk_mcp_runtime.common.openai_compatibility")
 
 # ───────────────────────── helpers ──────────────────────────
 
@@ -32,12 +32,8 @@ def from_openai_compatible_name(name: str) -> str:
 
 # ─────────────────── dynamic wrapper factory ─────────────────────
 
-def _build_wrapper_from_schema(*, alias_name: str, target: Callable, schema: Dict[str, Any]) -> Callable:
-    """Generate a coroutine whose signature mirrors *schema*.
-
-    The hidden *target* parameter is appended **after** all user‑visible
-    parameters so it can safely receive a default value.
-    """
+async def _build_wrapper_from_schema(*, alias_name: str, target: Callable, schema: Dict[str, Any]) -> Callable:
+    """Generate a coroutine whose signature mirrors *schema*."""
 
     props = schema.get("properties", {})
     required = set(schema.get("required", []))
@@ -64,12 +60,9 @@ def _build_wrapper_from_schema(*, alias_name: str, target: Callable, schema: Dic
 async def _alias({arg_sig}):
     kwargs = {kwargs_dict}
     kwargs = {{k: v for k, v in kwargs.items() if v is not None}}
-    res = __target(**kwargs)
-    if inspect.isawaitable(res):
-        res = await res
-    return res
+    return await __target(**kwargs)
 """
-    loc: Dict[str, Any] = {"inspect": inspect, "__default_target": target}
+    loc: Dict[str, Any] = {"__default_target": target}
     exec(src, loc)
     fn = loc["_alias"]
     fn.__name__ = alias_name
@@ -102,7 +95,7 @@ async def create_openai_compatible_wrapper(original_name: str, original_func: Ca
     # Strip leading "proxy." if present to avoid redundant prefix
     clean_name = original_name.replace("proxy.", "", 1)
     alias_name = to_openai_compatible_name(clean_name)
-    alias_fn = _build_wrapper_from_schema(alias_name=alias_name, target=original_func, schema=schema)
+    alias_fn = await _build_wrapper_from_schema(alias_name=alias_name, target=original_func, schema=schema)
 
     alias_meta = Tool(name=alias_name, description=description.strip().replace("\n", " "), inputSchema=schema)
     alias_fn._mcp_tool = alias_meta  # type: ignore[attr-defined]
@@ -133,6 +126,8 @@ class OpenAIToolsAdapter:
     async def register_openai_compatible_wrappers(self):
         """Register OpenAI-compatible wrappers for all tools with dots in their names."""
         # Register dot-named tools from TOOLS_REGISTRY
+        registered_count = 0
+        
         for o, fn in list(self.registry.items()):
             if "." not in o or o in self.original_to_openai.values():
                 continue
@@ -142,63 +137,71 @@ class OpenAIToolsAdapter:
             if w is None:
                 continue
             self.registry[w._mcp_tool.name] = w  # type: ignore[attr-defined]
+            registered_count += 1
             logger.debug("Registered OpenAI wrapper: %s → %s", w._mcp_tool.name, o)
             
         # Also register tools from the registry
-        registry = await ToolRegistryProvider.get_registry()
-        tools_list = await registry.list_tools()
-        
-        for namespace, name in tools_list:
-            # Skip tools that are already proxied
-            if namespace.startswith("proxy.") and "." in namespace:
-                continue
-                
-            # Create the fully qualified name and check if we already have it
-            fq_name = f"{namespace}.{name}" if namespace else name
-            openai_name = to_openai_compatible_name(fq_name)
+        try:
+            from chuk_tool_processor.registry import ToolRegistryProvider
+            registry = await ToolRegistryProvider.get_registry()
+            tools_list = await registry.list_tools()
             
-            if openai_name in self.registry:
-                continue
-                
-            try:
-                # Get the tool and metadata
-                tool_class = await registry.get_tool(name, namespace)
-                metadata = await registry.get_metadata(name, namespace)
-                
-                if tool_class and metadata:
-                    # Create a wrapper function that delegates to the tool class
-                    async def execute_wrapper(**kwargs):
-                        instance = tool_class()
-                        result = instance.execute(**kwargs)
-                        if inspect.isawaitable(result):
-                            return await result
-                        return result
+            for namespace, name in tools_list:
+                # Skip tools that are already proxied
+                if namespace.startswith("proxy.") and "." in namespace:
+                    continue
                     
-                    # Get or create a schema
-                    description = getattr(metadata, "description", f"Tool: {name}")
-                    input_schema = getattr(metadata, "input_schema", {})
-                    if not input_schema:
-                        input_schema = {"type": "object", "properties": {}, "required": []}
+                # Create the fully qualified name and check if we already have it
+                fq_name = f"{namespace}.{name}" if namespace else name
+                openai_name = to_openai_compatible_name(fq_name)
+                
+                if openai_name in self.registry:
+                    continue
+                    
+                try:
+                    # Get the tool and metadata
+                    tool_class = await registry.get_tool(name, namespace)
+                    metadata = await registry.get_metadata(name, namespace)
+                    
+                    if tool_class and metadata:
+                        # Create a wrapper function that delegates to the tool class
+                        async def execute_wrapper(**kwargs):
+                            instance = tool_class()
+                            result = instance.execute(**kwargs)
+                            if inspect.isawaitable(result):
+                                return await result
+                            return result
                         
-                    # Create a Tool metadata object
-                    tool_meta = Tool(
-                        name=openai_name,
-                        description=description.strip().replace("\n", " "),
-                        inputSchema=input_schema
-                    )
-                    
-                    # Attach metadata
-                    execute_wrapper._mcp_tool = tool_meta  # type: ignore[attr-defined]
-                    
-                    # Register in TOOLS_REGISTRY
-                    self.registry[openai_name] = execute_wrapper
-                    logger.debug(f"Registered class-based tool wrapper: {openai_name} → {fq_name}")
-                    
-            except Exception as e:
-                logger.warning(f"Error registering tool {namespace}.{name}: {e}")
-            
+                        # Get or create a schema
+                        description = getattr(metadata, "description", f"Tool: {name}")
+                        input_schema = getattr(metadata, "input_schema", {})
+                        if not input_schema:
+                            input_schema = {"type": "object", "properties": {}, "required": []}
+                            
+                        # Create a Tool metadata object
+                        tool_meta = Tool(
+                            name=openai_name,
+                            description=description.strip().replace("\n", " "),
+                            inputSchema=input_schema
+                        )
+                        
+                        # Attach metadata
+                        execute_wrapper._mcp_tool = tool_meta  # type: ignore[attr-defined]
+                        
+                        # Register in TOOLS_REGISTRY
+                        self.registry[openai_name] = execute_wrapper
+                        registered_count += 1
+                        logger.debug(f"Registered class-based tool wrapper: {openai_name} → {fq_name}")
+                        
+                except Exception as e:
+                    logger.warning(f"Error registering tool {namespace}.{name}: {e}")
+        except ImportError:
+            logger.debug("ToolRegistryProvider not available, skipping registry tool registration")
+                
         # Rebuild maps after registration
         self._build_maps()
+        
+        return registered_count
 
     # ---------- schema export ---------------------------------------
     async def get_openai_tools_definition(self) -> List[Dict[str, Any]]:
@@ -281,10 +284,7 @@ class OpenAIToolsAdapter:
             return result
         else:
             # Call function directly
-            res = fn(**kw)
-            if asyncio.iscoroutine(res):
-                res = await res
-            return res
+            return await fn(**kw)
 
     # ---------- translate -------------------------------------------
     def translate_name(self, name: str, to_openai: bool = True) -> str:
@@ -299,5 +299,6 @@ adapter = OpenAIToolsAdapter()
 
 async def initialize_openai_compatibility():
     """Initialize OpenAI compatibility by registering wrappers."""
-    await adapter.register_openai_compatible_wrappers()
+    count = await adapter.register_openai_compatible_wrappers()
+    logger.debug(f"Registered {count} OpenAI-compatible wrappers")
     return adapter

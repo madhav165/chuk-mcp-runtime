@@ -3,6 +3,8 @@
 chuk_mcp_runtime.proxy.manager
 ================================
 
+Fully async-native implementation of the proxy manager.
+
 Single-switch design:
 
 * `openai_compatible: true`  → expose **underscore** aliases only
@@ -18,7 +20,7 @@ import json
 import logging
 import os
 import tempfile
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, List, Set
 
 from chuk_mcp_runtime.common.mcp_tool_decorator import TOOLS_REGISTRY
 from chuk_mcp_runtime.common.openai_compatibility import (
@@ -129,7 +131,7 @@ class ProxyServerManager:
                 dotted_full = f"{dotted_ns}.{tool_name}"
 
                 # 1) Always create internal dot‑wrapper
-                wrapper = create_proxy_tool(dotted_ns, tool_name, self.stream_manager, meta)
+                wrapper = await create_proxy_tool(dotted_ns, tool_name, self.stream_manager, meta)
                 self.running[server]["wrappers"][tool_name] = wrapper
 
                 if self.openai_mode:
@@ -140,7 +142,7 @@ class ProxyServerManager:
                     under_name = to_openai_compatible_name(strip_proxy_prefix(dotted_full))
                     if under_name in self.openai_wrappers:
                         continue
-                    alias = create_openai_compatible_wrapper(dotted_full, wrapper)
+                    alias = await create_openai_compatible_wrapper(dotted_full, wrapper)
                     if alias:
                         TOOLS_REGISTRY[under_name] = alias
                         self.openai_wrappers[under_name] = alias
@@ -152,7 +154,7 @@ class ProxyServerManager:
         logger.debug("Registry overview-dot:%d | under:%d", len(dot), len(under))
 
     # ───────────────────── public helpers ─────────────────────────
-    def get_all_tools(self) -> Dict[str, Callable]:
+    async def get_all_tools(self) -> Dict[str, Callable]:
         if self.openai_mode:
             return dict(self.openai_wrappers)
         # expose dot names
@@ -172,3 +174,36 @@ class ProxyServerManager:
         srv = name.split(".")[1]
         tool = name.split(".")[-1]
         return await self.stream_manager.call_tool(tool, kw, srv)  # type: ignore[arg-type]
+    
+    async def process_text(self, text: str) -> List[Dict[str, Any]]:
+        """Process text with any available text processors in the proxy servers."""
+        results = []
+        
+        # Check if any server supports text processing
+        for server_name, server_info in self.running.items():
+            if not self.stream_manager:
+                continue
+                
+            try:
+                # Try to call a 'process_text' tool if available
+                processor_name = "process_text"
+                tools = await self.stream_manager.list_tools(server_name)
+                has_processor = any(t.get("name") == processor_name for t in tools)
+                
+                if has_processor:
+                    logger.debug(f"Calling {server_name}.process_text")
+                    result = await self.stream_manager.call_tool(
+                        processor_name, 
+                        {"text": text},
+                        server_name
+                    )
+                    
+                    if isinstance(result, dict) and not result.get("isError", False):
+                        results.append({
+                            "server": server_name,
+                            "content": result.get("content", [])
+                        })
+            except Exception as e:
+                logger.error(f"Error processing text with {server_name}: {e}")
+                
+        return results

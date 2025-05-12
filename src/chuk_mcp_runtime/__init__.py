@@ -4,15 +4,18 @@ CHUK MCP Runtime Package
 
 This package provides a runtime for CHUK MCP (Messaging Control Protocol) servers
 with integrated proxy support for connecting to remote MCP servers.
+
+Fully async-native implementation.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # Import key functions from entry module
-# We avoid importing the entire entry module to prevent circular imports
-from chuk_mcp_runtime.entry import run_runtime, main
+from chuk_mcp_runtime.entry import run_runtime, run_runtime_async, main, main_async
 
 __all__ = [
     'run_runtime',
+    'run_runtime_async',
     'main',
+    'main_async',
 ]
