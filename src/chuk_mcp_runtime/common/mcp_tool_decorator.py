@@ -62,7 +62,7 @@ async def create_input_schema(func: Callable[..., Any]) -> Dict[str, Any]:
     if HAS_PYDANTIC:
         fields: Dict[str, Any] = {}
         for name, param in sig.parameters.items():
-            if name == "self":
+            if name == "self" or name.startswith("__"):  # Skip internal parameters
                 continue
             ann = param.annotation if param.annotation is not inspect.Parameter.empty else str
             fields[name] = (ann, ...)
@@ -73,7 +73,7 @@ async def create_input_schema(func: Callable[..., Any]) -> Dict[str, Any]:
         required = []
         hints = get_type_hints(func)
         for name, param in sig.parameters.items():
-            if name == "self":
+            if name == "self" or name.startswith("__"):  # Skip internal parameters
                 continue
             ann = hints.get(name, str)
             props[name] = _get_type_schema(ann)
@@ -86,55 +86,30 @@ def mcp_tool(name: str = None, description: str = None):
     Decorator to register an async tool.
     Only works with async functions - no synchronous functions allowed.
     """
-    def decorator(func: Callable[..., Any]):
+    def decorator(original_func: Callable[..., Any]):
         # Ensure function is async
-        if not inspect.iscoroutinefunction(func):
-            raise TypeError(f"Function {func.__name__} must be async (use 'async def')")
+        if not inspect.iscoroutinefunction(original_func):
+            raise TypeError(f"Function {original_func.__name__} must be async (use 'async def')")
             
-        tool_name = name or func.__name__
-        tool_desc = description or (func.__doc__ or "").strip() or f"Tool: {tool_name}"
+        tool_name = name or original_func.__name__
+        tool_desc = description or (original_func.__doc__ or "").strip() or f"Tool: {tool_name}"
 
-        # Build input schema and metadata
-        async def register_tool():
-            schema = await create_input_schema(func)
-            tool = Tool(name=tool_name, description=tool_desc, inputSchema=schema)
+        # Store a reference to the original function
+        @wraps(original_func)
+        async def wrapper(*args, **kwargs):
+            # Forward all arguments directly to the original function
+            return await original_func(*args, **kwargs)
             
-            # Create a properly wrapped async function
-            @wraps(func)
-            async def wrapper(*args, **kwargs):
-                return await func(*args, **kwargs)
-            
-            # Attach metadata on the wrapper
-            wrapper._mcp_tool = tool  # type: ignore[attr-defined]
-            
-            # Register the wrapper, not the original func
-            TOOLS_REGISTRY[tool_name] = wrapper
-            return wrapper
-            
-        # We need to handle the fact that we're doing async initialization
-        # inside a decorator that can't be async - so we return a placeholder
-        # that will be replaced when the tool registry is initialized
+        # We'll set up the function's schema and metadata later during initialization
+        wrapper._needs_init = True
+        wrapper._init_name = tool_name
+        wrapper._init_desc = tool_desc
+        wrapper._orig_func = original_func
         
-        @wraps(func)
-        async def placeholder(*args, **kwargs):
-            if tool_name in TOOLS_REGISTRY:
-                # The tool has been initialized, use the proper wrapper
-                return await TOOLS_REGISTRY[tool_name](*args, **kwargs)
-            else:
-                # Register the tool now
-                wrapper = await register_tool()
-                return await wrapper(*args, **kwargs)
-            
-        # Add a reference to the original function and initialization info
-        placeholder._needs_init = True  # type: ignore[attr-defined]
-        placeholder._init_name = tool_name  # type: ignore[attr-defined]
-        placeholder._init_desc = tool_desc  # type: ignore[attr-defined]
-        placeholder._orig_func = func  # type: ignore[attr-defined]
+        # Register immediately
+        TOOLS_REGISTRY[tool_name] = wrapper
         
-        # Register the placeholder for later initialization
-        TOOLS_REGISTRY[tool_name] = placeholder
-        
-        return placeholder
+        return wrapper
 
     return decorator
 
@@ -142,30 +117,42 @@ async def initialize_tool_registry():
     """
     Initialize all tools in the registry that need initialization.
     """
-    tools_to_init = []
-    
-    # First, identify all tools that need initialization
     for tool_name, func in list(TOOLS_REGISTRY.items()):
         if hasattr(func, '_needs_init') and func._needs_init:
-            tools_to_init.append((tool_name, func))
-    
-    # Then initialize each one
-    for tool_name, placeholder in tools_to_init:
-        original_func = placeholder._orig_func
-        schema = await create_input_schema(original_func)
-        tool = Tool(
-            name=placeholder._init_name, 
-            description=placeholder._init_desc, 
-            inputSchema=schema
-        )
+            await _initialize_tool(tool_name, func)
+
+async def _initialize_tool(tool_name: str, placeholder: Callable):
+    """Initialize a specific tool."""
+    if not hasattr(placeholder, '_needs_init') or not placeholder._needs_init:
+        return
         
-        @wraps(original_func)
-        async def wrapper(*args, **kwargs):
+    original_func = placeholder._orig_func
+    schema = await create_input_schema(original_func)
+    tool = Tool(
+        name=placeholder._init_name, 
+        description=placeholder._init_desc, 
+        inputSchema=schema
+    )
+    
+    @wraps(original_func)
+    async def wrapper(*args, **kwargs):
+        try:
+            # Forward all arguments directly to the original function
             return await original_func(*args, **kwargs)
-            
-        # Attach metadata and replace in registry
-        wrapper._mcp_tool = tool  # type: ignore[attr-defined]
-        TOOLS_REGISTRY[tool_name] = wrapper
+        except TypeError as e:
+            # Better error handling for parameter mismatches
+            sig = inspect.signature(original_func)
+            valid_params = [p for p in sig.parameters if not p.startswith('__')]
+            logging.error(f"Error calling {tool_name}: {e}. Valid parameters: {valid_params}")
+            raise
+    
+    # Attach metadata
+    wrapper._mcp_tool = tool
+    wrapper._needs_init = False
+    wrapper._orig_func = original_func
+    
+    # Replace in registry
+    TOOLS_REGISTRY[tool_name] = wrapper
 
 async def execute_tool(tool_name: str, **kwargs) -> Any:
     """
@@ -173,8 +160,15 @@ async def execute_tool(tool_name: str, **kwargs) -> Any:
     """
     if tool_name not in TOOLS_REGISTRY:
         raise KeyError(f"Tool '{tool_name}' not registered")
-    fn = TOOLS_REGISTRY[tool_name]
-    return await fn(**kwargs)
+    
+    # Initialize if needed
+    func = TOOLS_REGISTRY[tool_name]
+    if hasattr(func, '_needs_init') and func._needs_init:
+        await _initialize_tool(tool_name, func)
+        func = TOOLS_REGISTRY[tool_name]
+    
+    # Execute the tool
+    return await func(**kwargs)
 
 async def scan_for_tools(module_paths: List[str]) -> None:
     """
