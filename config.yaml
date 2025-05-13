@@ -1,26 +1,33 @@
 # config.yaml
+host:
+  name: "chuk-mcp-runtime"
+  log_level: "INFO"
+
+server:
+  type: "sse"
+
+# optional overrides
+sse:
+  host: "0.0.0.0"
+  port: 8000
+  sse_path: "/sse"
+  message_path: "/messages/"
+  log_level: "info"
+  access_log: true
+
 proxy:
   enabled: true
   namespace: "proxy"
   openai_compatible: true   # ← set to true if you want underscores
+
 mcp_servers:
   time:
     type: "stdio"
     command: "uvx"
     args: ["mcp-server-time", "--local-timezone", "America/New_York"]
-  # time2:
-  #   type: "stdio"
-  #   command: "uv"
-  #   args:
-  #     - --directory
-  #     - /Users/christopherhay/chris-source/chuk-mcp-servers/chuk-mcp-time-server
-  #     - run
-  #     - src/chuk_mcp_time_server/main.py
-  echo2:
-    type: "stdio"
-    command: "uv"
-    args:
-      - --directory
-      - /Users/chrishay/chris-source/mcp-advantage/mcp-echo-server
-      - run
-      - src/mcp_echo_server/main.py
+  echo:
+    enabled: true
+    location: "../mcp-ping-server/src"
+    tools:
+      enabled: true
+      module: "mcp_ping_server.ping_tools.tools"
