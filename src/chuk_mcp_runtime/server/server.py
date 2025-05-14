@@ -10,6 +10,7 @@ import json
 import inspect
 import importlib
 from typing import Dict, Any, List, Optional, Union, Callable
+import re
 
 # MCP imports (assuming these are from an external package)
 from mcp.server import Server
@@ -19,13 +20,79 @@ from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource
 
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
-from starlette.responses import Response
+from starlette.responses import Response, JSONResponse
 from starlette.requests import Request
+from starlette.exceptions import HTTPException
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware import Middleware
 import uvicorn
 
 # Local imports
 from chuk_mcp_runtime.server.logging_config import get_logger
 from chuk_mcp_runtime.common.mcp_tool_decorator import TOOLS_REGISTRY, initialize_tool_registry
+from chuk_mcp_runtime.common.verify_credentials import validate_token
+
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.datastructures import MutableHeaders
+from typing import Callable
+
+
+class AuthMiddleware:
+    """Auth middleware"""
+    def __init__(self, app: ASGIApp, auth: str = None):
+        self.app = app
+        self.auth = auth
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] != "http" or self.auth is None:
+            return await self.app(scope, receive, send)
+
+        request = Request(scope, receive=receive)
+        headers = MutableHeaders(scope=scope)
+        token = None
+
+        # Get token from Authorization header
+        if self.auth == "bearer":
+            if "Authorization" in headers:
+                match = re.match(
+                    r"Bearer\s+(.+)",
+                    headers.get("Authorization"),
+                    re.IGNORECASE
+                )
+                if match:
+                    token = match.group(1)
+                else:
+                    token = ""
+            else:
+                token = ""
+
+            # Try token from cookies
+            if not token:
+                token = request.cookies.get("jwt_token")
+
+        if not token:
+            response = JSONResponse(
+                {"error": "Not authenticated"},
+                status_code=401
+            )
+            return await response(scope, receive, send)
+
+        # Validate token
+        try:
+            payload = await validate_token(token)
+            scope["user"] = payload
+            # return await response(scope, receive, send)
+        except HTTPException as ex:
+            response = JSONResponse(
+                {"error": ex.detail},
+                status_code=ex.status_code
+            )
+            return await response(scope, receive, send)
+
+        # Auth OK, pass to app
+        await self.app(scope, receive, send)
 
 
 class MCPServer:
@@ -200,7 +267,7 @@ class MCPServer:
         server_type = self.config.get("server", {}).get("type", "stdio")
         
         if server_type == "stdio":
-            self.logger.debug("Starting stdio server")
+            self.logger.info("Starting stdio server")
             async with stdio_server() as (read_stream, write_stream):
                 await server.run(read_stream, write_stream, options)
         elif server_type == "sse":
@@ -217,7 +284,11 @@ class MCPServer:
             sse_transport = SseServerTransport(msg_path)
             
             async def handle_sse(request: Request):
-                async with sse_transport.connect_sse(request.scope, request.receive, request._send) as streams:
+                async with sse_transport.connect_sse(
+                    request.scope,
+                    request.receive,
+                    request._send
+                ) as streams:
                     await server.run(streams[0], streams[1], options)
                 # Return empty response to avoid NoneType error
                 return Response()
@@ -228,6 +299,11 @@ class MCPServer:
             ]
             
             starlette_app = Starlette(routes=routes)
+            
+            starlette_app.add_middleware(
+                AuthMiddleware,
+                auth=self.config.get("server", {}).get("auth", None)
+            )
             
             # uvicorn.run(starlette_app, host="0.0.0.0", port=port)
             config = uvicorn.Config(starlette_app, host=host, port=port, log_level="info")

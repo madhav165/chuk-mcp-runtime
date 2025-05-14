@@ -249,6 +249,14 @@ To expose MCP tools through a web interface:
 
 ```yaml
 # web_server_config.yaml
+host:
+  name: "chuk-mcp-runtime"
+  log_level: "INFO"
+
+server:
+  type: "sse"
+  auth: "bearer" # this line is needed to enable bearer auth
+
 proxy:
   enabled: true
   namespace: "proxy"
