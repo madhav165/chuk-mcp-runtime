@@ -5,6 +5,7 @@ host:
 
 server:
   type: "sse"
+  auth: "bearer" # this line is needed to enable bearer auth
 
 # optional overrides
 sse:
