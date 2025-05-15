@@ -1,3 +1,4 @@
+# tests/test_openai_compatibility.py
 """
 Test module for OpenAI API compatibility functionality.
 
