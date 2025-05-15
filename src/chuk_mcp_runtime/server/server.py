@@ -31,6 +31,7 @@ import uvicorn
 from chuk_mcp_runtime.server.logging_config import get_logger
 from chuk_mcp_runtime.common.mcp_tool_decorator import TOOLS_REGISTRY, initialize_tool_registry
 from chuk_mcp_runtime.common.verify_credentials import validate_token
+from chuk_mcp_runtime.common.tool_naming import resolve_tool_name, update_naming_maps
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -123,6 +124,9 @@ class MCPServer:
         
         # Tools registry
         self.tools_registry = tools_registry or TOOLS_REGISTRY
+        
+        # Update the tool naming maps to ensure resolution works correctly
+        update_naming_maps()
     
     async def _import_tools_registry(self) -> Dict[str, Callable]:
         """
@@ -163,6 +167,9 @@ class MCPServer:
             self.logger.debug(f"Loaded {len(tools_registry)} tools")
             self.logger.debug(f"Available tools: {', '.join(tools_registry.keys())}")
         
+        # Update naming maps after importing tools
+        update_naming_maps()
+        
         return tools_registry
     
     async def serve(self, custom_handlers: Optional[Dict[str, Callable]] = None) -> None:
@@ -180,6 +187,9 @@ class MCPServer:
         
         # Initialize any tool placeholders
         await initialize_tool_registry()
+        
+        # Update naming maps after initializing tools
+        update_naming_maps()
             
         server = Server(self.server_name)
 
@@ -219,12 +229,18 @@ class MCPServer:
             Raises:
                 ValueError: If tool is not found or fails to execute.
             """
-            if name not in self.tools_registry:
-                raise ValueError(f"Tool not found: {name}")
+            # Resolve tool name using the compatibility layer
+            resolved_name = resolve_tool_name(name)
             
-            func = self.tools_registry[name]
+            if resolved_name != name:
+                self.logger.debug(f"Resolved tool name '{name}' to '{resolved_name}'")
+            
+            if resolved_name not in self.tools_registry:
+                raise ValueError(f"Tool not found: {name} (resolved to {resolved_name})")
+            
+            func = self.tools_registry[resolved_name]
             try:
-                self.logger.debug(f"Executing tool '{name}' with arguments: {arguments}")
+                self.logger.debug(f"Executing tool '{resolved_name}' with arguments: {arguments}")
                 
                 # Execute the tool (should always be async)
                 result = await func(**arguments)
@@ -253,9 +269,9 @@ class MCPServer:
                 
             except Exception as e:
                 self.logger.error(
-                    f"Error processing tool '{name}': {e}", exc_info=True
+                    f"Error processing tool '{resolved_name}': {e}", exc_info=True
                 )
-                raise ValueError(f"Error processing tool '{name}': {str(e)}")
+                raise ValueError(f"Error processing tool '{resolved_name}': {str(e)}")
         
         # Add any custom handlers
         if custom_handlers:
@@ -326,6 +342,9 @@ class MCPServer:
             
         self.tools_registry[name] = func
         self.logger.debug(f"Registered tool: {name}")
+        
+        # Update naming maps after registering a new tool
+        update_naming_maps()
         
     async def get_tool_names(self) -> List[str]:
         """

@@ -1,3 +1,4 @@
+# chuk_mcp_runtime/verify_credentials.py
 import os
 import jwt
 from jwt import PyJWTError

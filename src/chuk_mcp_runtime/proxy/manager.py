@@ -29,6 +29,7 @@ from chuk_mcp_runtime.common.openai_compatibility import (
 )
 from chuk_mcp_runtime.proxy.tool_wrapper import create_proxy_tool
 from chuk_mcp_runtime.server.logging_config import get_logger
+from chuk_mcp_runtime.common.tool_naming import resolve_tool_name, update_naming_maps
 
 try:
     from chuk_tool_processor.mcp import setup_mcp_stdio
@@ -65,6 +66,9 @@ class ProxyServerManager:
         self.running: Dict[str, Dict[str, Any]] = {}
         self.openai_wrappers: Dict[str, Callable] = {}
         self._tmp_cfg: tempfile.NamedTemporaryFile | None = None
+        
+        # Update the tool naming maps
+        update_naming_maps()
 
     # ─────────────────────── bootstrap / shutdown ───────────────────────
     async def start_servers(self) -> None:
@@ -106,6 +110,9 @@ class ProxyServerManager:
             self.running[srv] = {"wrappers": {}}
 
         await self._discover_and_wrap()
+        
+        # Update naming maps after discovering tools
+        update_naming_maps()
 
     async def stop_servers(self) -> None:
         if self.stream_manager:
@@ -152,6 +159,9 @@ class ProxyServerManager:
         dot = [k for k in TOOLS_REGISTRY if "." in k]
         under = [k for k in TOOLS_REGISTRY if "_" in k and "." not in k]
         logger.debug("Registry overview-dot:%d | under:%d", len(dot), len(under))
+        
+        # Update naming maps after wrapping tools
+        update_naming_maps()
 
     # ───────────────────── public helpers ─────────────────────────
     async def get_all_tools(self) -> Dict[str, Callable]:
@@ -164,15 +174,53 @@ class ProxyServerManager:
         return exposed
 
     async def call_tool(self, name: str, **kw):
-        """Convenience proxy that maps underscore names back to dot."""
-        if "_" in name and name not in TOOLS_REGISTRY:
-            # Convert back to dotted form
-            parts = name.split("_", 1)
-            if len(parts) == 2:
-                server, tool = parts
-                name = f"{self.ns_root}.{server}.{tool}"
-        srv = name.split(".")[1]
-        tool = name.split(".")[-1]
+        """Convenience proxy that maps between different tool naming conventions."""
+        # First try to resolve the name using the compatibility layer
+        resolved_name = resolve_tool_name(name)
+        
+        # If it's still not found in TOOLS_REGISTRY, try manual conversion
+        if resolved_name not in TOOLS_REGISTRY:
+            if "_" in name and name not in TOOLS_REGISTRY:
+                # Convert back to dotted form
+                parts = name.split("_", 1)
+                if len(parts) == 2:
+                    server, tool = parts
+                    name = f"{self.ns_root}.{server}.{tool}"
+            elif "." in name and name not in TOOLS_REGISTRY:
+                # Try to extract the server and tool parts
+                parts = name.split(".")
+                if len(parts) >= 2:
+                    server = parts[-2]
+                    tool = parts[-1]
+                    # Try different combinations
+                    name = f"{self.ns_root}.{server}.{tool}"
+        else:
+            name = resolved_name
+            
+        # Extract server and tool information
+        if name.startswith(f"{self.ns_root}."):
+            parts = name[len(self.ns_root)+1:].split(".")
+            if len(parts) >= 2:
+                srv = parts[0]
+                tool = parts[-1]
+            else:
+                # Fallback
+                srv = name.split(".")[1] if len(name.split(".")) > 1 else ""
+                tool = name.split(".")[-1]
+        else:
+            # Fallback to simple splitting
+            parts = name.split(".")
+            srv = parts[0] if len(parts) > 1 else ""
+            tool = parts[-1]
+        
+        # Log the resolution for debugging
+        logger.debug(f"Calling tool {tool} on server {srv} (from original name: {name})")
+        
+        # Make sure the stream manager exists
+        if not self.stream_manager:
+            raise RuntimeError("Stream manager not initialized")
+        
+        # Execute the tool via the stream manager
         return await self.stream_manager.call_tool(tool, kw, srv)  # type: ignore[arg-type]
     
     async def process_text(self, text: str) -> List[Dict[str, Any]]:
