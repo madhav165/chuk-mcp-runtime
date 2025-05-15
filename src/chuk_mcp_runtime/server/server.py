@@ -217,116 +217,65 @@ class MCPServer:
             arguments: Dict[str, Any]
         ) -> List[Union[TextContent, ImageContent, EmbeddedResource]]:
             """
-            Execute a specific tool with given arguments.
-            
-            Args:
-                name: Name of the tool to execute.
-                arguments: Arguments for the tool.
-            
-            Returns:
-                List of content resulting from tool execution.
-            
-            Raises:
-                ValueError: If tool is not found or fails to execute.
-            """
-            # Resolve tool name using the compatibility layer
-            resolved_name = resolve_tool_name(name)
-            
-            if resolved_name != name:
-                self.logger.debug(f"Resolved tool name '{name}' to '{resolved_name}'")
-            
-            if resolved_name not in self.tools_registry:
-                raise ValueError(f"Tool not found: {name} (resolved to {resolved_name})")
-            
-            func = self.tools_registry[resolved_name]
-            try:
-                self.logger.debug(f"Executing tool '{resolved_name}' with arguments: {arguments}")
-                
-                # Execute the tool (should always be async)
-                result = await func(**arguments)
-                
-                # If result is already content objects, return as is
-                if (
-                    isinstance(result, list)
-                    and all(
-                        isinstance(item, (TextContent, ImageContent, EmbeddedResource))
-                        for item in result
-                    )
-                ):
-                    return result
-                
-                # If it's a simple string, wrap in TextContent
-                if isinstance(result, str):
-                    return [TextContent(type="text", text=result)]
-                
-                # Otherwise, serialize to JSON and wrap
-                return [
-                    TextContent(
-                        type="text",
-                        text=json.dumps(result, indent=2)
-                    )
-                ]
-                
-            except Exception as e:
-                self.logger.error(
-                    f"Error processing tool '{resolved_name}': {e}", exc_info=True
-                )
-                raise ValueError(f"Error processing tool '{resolved_name}': {str(e)}")
-        
-        # Add any custom handlers
-        if custom_handlers:
-            for handler_name, handler_func in custom_handlers.items():
-                self.logger.debug(f"Adding custom handler: {handler_name}")
-                setattr(server, handler_name, handler_func)
+            Execute a tool.
 
-        options = server.create_initialization_options()
-        server_type = self.config.get("server", {}).get("type", "stdio")
-        
-        if server_type == "stdio":
-            self.logger.info("Starting stdio server")
-            async with stdio_server() as (read_stream, write_stream):
-                await server.run(read_stream, write_stream, options)
-        elif server_type == "sse":
-            self.logger.info("Starting MCP server over SSE")
-            # Get SSE server configuration
-            sse_config = self.config.get("sse", {})
-            host = sse_config.get("host", "127.0.0.1")
-            port = sse_config.get("port", 8000)
-            sse_path = sse_config.get("sse_path", "/sse")
-            msg_path = sse_config.get("message_path", "/messages/")
-            
-            # Create the starlette app with routes
-            # Create the SSE transport instance
-            sse_transport = SseServerTransport(msg_path)
-            
-            async def handle_sse(request: Request):
-                async with sse_transport.connect_sse(
-                    request.scope,
-                    request.receive,
-                    request._send
-                ) as streams:
-                    await server.run(streams[0], streams[1], options)
-                # Return empty response to avoid NoneType error
-                return Response()
-            
-            routes = [
-                Route(sse_path, endpoint=handle_sse, methods=["GET"]),
-                Mount(msg_path, app=sse_transport.handle_post_message),
-            ]
-            
-            starlette_app = Starlette(routes=routes)
-            
-            starlette_app.add_middleware(
-                AuthMiddleware,
-                auth=self.config.get("server", {}).get("auth", None)
-            )
-            
-            # uvicorn.run(starlette_app, host="0.0.0.0", port=port)
-            config = uvicorn.Config(starlette_app, host=host, port=port, log_level="info")
-            uvicorn_server = uvicorn.Server(config)
-            await uvicorn_server.serve()
-        else:
-            raise ValueError(f"Unknown server type: {server_type}")
+            Typical CLI calls deliver exactly the registered tool name
+            (e.g. ``duckduckgo_search``).  But when the CLI uses the
+            “server.tool” syntax, the front-end splits that into
+            ``server = duckduckgo`` and ``name = search`` before it
+            reaches us.  That used to raise “Tool 'search' not found”.
+
+            The resolver below tries four strategies in order:
+
+            1. direct lookup                           (fast path)
+            2. compatibility-mapper (`resolve_tool_name`)
+            3. *unique* suffix match  “…_{name}”
+            4. *unique* suffix match  “….{name}”
+
+            If more than one candidate matches a suffix we *fail fast*
+            with a clear error so ambiguity is never silent.
+            """
+            registry = self.tools_registry
+
+            # 1) direct hit
+            if name in registry:
+                resolved = name
+            else:
+                # 2) smart resolver (dot <-> underscore table)
+                resolved = resolve_tool_name(name)
+
+                # 3 / 4) last-chance suffix search
+                if resolved not in registry:
+                    matches = [
+                        k for k in registry
+                        if k.endswith(f"_{name}") or k.endswith(f".{name}")
+                    ]
+                    if len(matches) == 1:
+                        resolved = matches[0]
+
+            if resolved not in registry:
+                raise ValueError(f"Tool not found: {name}")
+
+            func = registry[resolved]
+            self.logger.debug("Executing '%s' with %s", resolved, arguments)
+            try:
+                result = await func(**arguments)
+            except Exception as exc:
+                self.logger.error("Tool '%s' failed: %s", resolved, exc, exc_info=True)
+                raise ValueError(f"Error processing tool '{resolved}': {exc}") from exc
+
+            # ---------- normalise result to MCP content ----------
+            if (
+                isinstance(result, list)
+                and all(isinstance(r, (TextContent, ImageContent, EmbeddedResource)) for r in result)
+            ):
+                return result
+
+            if isinstance(result, str):
+                return [TextContent(type="text", text=result)]
+
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
 
     async def register_tool(self, name: str, func: Callable) -> None:
         """
