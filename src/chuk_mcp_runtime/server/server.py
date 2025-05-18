@@ -275,6 +275,61 @@ class MCPServer:
                 return [TextContent(type="text", text=result)]
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        
+        # Add any custom handlers
+        if custom_handlers:
+            for handler_name, handler_func in custom_handlers.items():
+                self.logger.debug(f"Adding custom handler: {handler_name}")
+                setattr(server, handler_name, handler_func)
+
+        options = server.create_initialization_options()
+        server_type = self.config.get("server", {}).get("type", "stdio")
+        
+        if server_type == "stdio":
+            self.logger.info("Starting stdio server")
+            async with stdio_server() as (read_stream, write_stream):
+                await server.run(read_stream, write_stream, options)
+        elif server_type == "sse":
+            self.logger.info("Starting MCP server over SSE")
+            # Get SSE server configuration
+            sse_config = self.config.get("sse", {})
+            host = sse_config.get("host", "127.0.0.1")
+            port = sse_config.get("port", 8000)
+            sse_path = sse_config.get("sse_path", "/sse")
+            msg_path = sse_config.get("message_path", "/messages/")
+            
+            # Create the starlette app with routes
+            # Create the SSE transport instance
+            sse_transport = SseServerTransport(msg_path)
+            
+            async def handle_sse(request: Request):
+                async with sse_transport.connect_sse(
+                    request.scope,
+                    request.receive,
+                    request._send
+                ) as streams:
+                    await server.run(streams[0], streams[1], options)
+                # Return empty response to avoid NoneType error
+                return Response()
+            
+            routes = [
+                Route(sse_path, endpoint=handle_sse, methods=["GET"]),
+                Mount(msg_path, app=sse_transport.handle_post_message),
+            ]
+            
+            starlette_app = Starlette(routes=routes)
+            
+            starlette_app.add_middleware(
+                AuthMiddleware,
+                auth=self.config.get("server", {}).get("auth", None)
+            )
+            
+            # uvicorn.run(starlette_app, host="0.0.0.0", port=port)
+            config = uvicorn.Config(starlette_app, host=host, port=port, log_level="info")
+            uvicorn_server = uvicorn.Server(config)
+            await uvicorn_server.serve()
+        else:
+            raise ValueError(f"Unknown server type: {server_type}")
 
 
     async def register_tool(self, name: str, func: Callable) -> None:
