@@ -22,13 +22,13 @@ proxy:
   openai_compatible: false   # ← set to true if you want underscores
 
 mcp_servers:
-  time:
-    type: "stdio"
-    command: "uvx"
-    args: ["mcp-server-time", "--local-timezone", "America/New_York"]
+  # time:
+  #   type: "stdio"
+  #   command: "uvx"
+  #   args: ["mcp-server-time", "--local-timezone", "America/New_York"]
   echo:
     enabled: true
-    location: "../mcp-echo-server/src"
+    location: "../mcp-time-server/src"
     tools:
       enabled: true
-      module: "mcp_echo_server.echo_tools.tools"
+      module: "mcp_time_server.time_tools.tools"

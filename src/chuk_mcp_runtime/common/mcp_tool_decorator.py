@@ -11,6 +11,7 @@ import importlib
 from functools import wraps
 from typing import Any, Callable, Dict, Type, TypeVar, get_type_hints, Optional, List
 import logging
+from types import ModuleType
 
 T = TypeVar("T")
 
@@ -113,13 +114,39 @@ def mcp_tool(name: str = None, description: str = None):
 
     return decorator
 
+
+# def mcp_tool(name: str = None, description: str = None):
+#     """
+#     No-op decorator to mark a tool.
+#     Since tools run in isolated venv subprocesses, 
+#     this no longer wraps or registers async functions.
+#     """
+#     def decorator(func):
+#         # Optionally, you can register metadata here if you want
+#         tool_name = name or func.__name__
+#         tool_desc = description or (func.__doc__ or "").strip() or f"Tool: {tool_name}"
+        
+#         # For example, register metadata only (no function object)
+#         TOOLS_REGISTRY[tool_name] = {
+#             "description": tool_desc,
+#             # no function attached
+#         }
+        
+#         # Return the function unchanged
+#         return func
+
+#     return decorator
+
+
 async def initialize_tool_registry():
     """
     Initialize all tools in the registry that need initialization.
     """
+    logging.getLogger("__name__").info(f'{TOOLS_REGISTRY=}')
     for tool_name, func in list(TOOLS_REGISTRY.items()):
         if hasattr(func, '_needs_init') and func._needs_init:
             await _initialize_tool(tool_name, func)
+
 
 async def _initialize_tool(tool_name: str, placeholder: Callable):
     """Initialize a specific tool."""
@@ -187,6 +214,34 @@ async def scan_for_tools(module_paths: List[str]) -> None:
     
     # Initialize all tools that have been registered
     await initialize_tool_registry()
+
+
+async def get_tool_functions(tool_modules: List[str]) -> Dict[str, Callable]:
+    """
+    Dynamically import a module and extract top-level functions from it.
+
+    Args:
+        module_name (str): Fully qualified module name (e.g., "my_pkg.my_tools").
+
+    Returns:
+        Dict[str, Callable]: A dictionary of function names to callables.
+    """
+    tool_funcs = {}
+
+    for tool_module in tool_modules:
+        try:
+            mod: ModuleType = importlib.import_module(tool_module)
+
+            for name, obj in inspect.getmembers(mod, inspect.isfunction):
+                if name != "mcp_tool" and name not in tool_funcs:
+                    tool_funcs[name] = obj
+        except ImportError as e:
+            logging.getLogger("chuk_mcp_runtime.tools").warning(
+                f"Failed to import module {tool_module}: {e}"
+            )
+
+    return tool_funcs
+
 
 async def get_tool_metadata(tool_name: Optional[str] = None) -> Dict[str, Any]:
     """
