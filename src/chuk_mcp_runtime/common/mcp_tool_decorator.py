@@ -38,6 +38,7 @@ except ImportError:
 # Global registry of tool functions (always async)
 TOOLS_REGISTRY: Dict[str, Callable[..., Any]] = {}
 
+
 def _get_type_schema(annotation: Type) -> Dict[str, Any]:
     """Map Python types to JSON Schema."""
     if annotation == str:
@@ -54,6 +55,7 @@ def _get_type_schema(annotation: Type) -> Dict[str, Any]:
     if origin is dict:
         return {"type": "object"}
     return {"type": "string"}
+
 
 async def create_input_schema(func: Callable[..., Any]) -> Dict[str, Any]:
     """
@@ -81,6 +83,7 @@ async def create_input_schema(func: Callable[..., Any]) -> Dict[str, Any]:
             if param.default is inspect.Parameter.empty:
                 required.append(name)
         return {"type": "object", "properties": props, "required": required}
+
 
 def mcp_tool(name: str = None, description: str = None):
     """
@@ -113,29 +116,6 @@ def mcp_tool(name: str = None, description: str = None):
         return wrapper
 
     return decorator
-
-
-# def mcp_tool(name: str = None, description: str = None):
-#     """
-#     No-op decorator to mark a tool.
-#     Since tools run in isolated venv subprocesses, 
-#     this no longer wraps or registers async functions.
-#     """
-#     def decorator(func):
-#         # Optionally, you can register metadata here if you want
-#         tool_name = name or func.__name__
-#         tool_desc = description or (func.__doc__ or "").strip() or f"Tool: {tool_name}"
-        
-#         # For example, register metadata only (no function object)
-#         TOOLS_REGISTRY[tool_name] = {
-#             "description": tool_desc,
-#             # no function attached
-#         }
-        
-#         # Return the function unchanged
-#         return func
-
-#     return decorator
 
 
 async def initialize_tool_registry():
