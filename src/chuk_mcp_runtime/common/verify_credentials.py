@@ -3,7 +3,7 @@
 JWT-based credential validation for the CHUK MCP runtime.
 
 * Reads secret, allowed algorithms, and leeway from env vars
-  – defaults are safe but test-friendly.
+  - defaults are safe but test-friendly.
 * Adds a small leeway so that fractional-second ``exp`` values created
   with ``datetime.utcnow().timestamp()`` don’t fail validation by a
   couple of milliseconds.
@@ -27,7 +27,7 @@ from starlette.status import HTTP_401_UNAUTHORIZED
 JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "my-test-key")
 JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
 
-# Allowed algs – comma-separated env var or sensible default set
+# Allowed algs - comma-separated env var or sensible default set
 _default_algs = f"{JWT_ALGORITHM},HS384,HS512"
 JWT_ALLOWED_ALGORITHMS: List[str] = [
     alg.strip()

@@ -86,7 +86,7 @@ async def create_openai_compatible_wrapper(original_name: str, original_func: Ca
         schema = copy.deepcopy(getattr(m, "inputSchema", {}))
         description = getattr(m, "description", "")
     else:
-        logger.warning("No schema for %s – skipping OpenAI wrapper", original_name)
+        logger.warning("No schema for %s - skipping OpenAI wrapper", original_name)
         return None
 
     if "properties" not in schema and isinstance(schema, dict):

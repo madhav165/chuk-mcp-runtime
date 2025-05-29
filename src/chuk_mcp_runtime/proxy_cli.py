@@ -46,7 +46,7 @@ from chuk_mcp_runtime.server.logging_config import configure_logging
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Launch the CHUK proxy layer.")
     p.add_argument("--config", metavar="FILE",
-                   help="YAML config file (optional – can be combined with flags below)")
+                   help="YAML config file (optional - can be combined with flags below)")
 
     # declare servers
     p.add_argument("--stdio", action="append", metavar="NAME",

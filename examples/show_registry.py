@@ -105,7 +105,7 @@ async def main(config_path: str) -> None:
     if not os.path.exists(config_path):
         alt = os.path.join(ROOT, "stdio_proxy_config.yaml")
         if os.path.exists(alt):
-            print(f"⚠️  {config_path} not found – falling back to {alt}")
+            print(f"⚠️  {config_path} not found - falling back to {alt}")
             config_path = alt
         else:
             raise FileNotFoundError(f"Config file not found: {config_path}")

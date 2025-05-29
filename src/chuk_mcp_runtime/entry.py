@@ -78,7 +78,7 @@ async def run_runtime_async(
             await proxy_mgr.start_servers()
             running = len(getattr(proxy_mgr, "running", {}))
             if running:
-                logger.info("Proxy layer enabled – %d server(s) booted", running)
+                logger.info("Proxy layer enabled - %d server(s) booted", running)
         except Exception as e:
             logger.error("Error starting proxy layer: %s", e, exc_info=True)
             proxy_mgr = None

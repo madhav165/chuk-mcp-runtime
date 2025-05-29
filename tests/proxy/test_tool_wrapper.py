@@ -49,7 +49,7 @@ def _isolate_tools_registry():
 @pytest.fixture(autouse=True)
 def _neutralise_toolregistryprovider(monkeypatch):
     """
-    Most tests don’t need ToolRegistryProvider – set it to **None** so
+    Most tests don’t need ToolRegistryProvider - set it to **None** so
     `create_proxy_tool()` skips the registration block.
     """
     monkeypatch.setattr(tw, "ToolRegistryProvider", None, raising=False)

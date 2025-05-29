@@ -78,7 +78,7 @@ async def create_proxy_tool(
     server_name = namespace.split(".")[-1]
 
     # ------------------------------------------------------------------ #
-    #   async wrapper – default-arg trick pins values at definition time #
+    #   async wrapper - default-arg trick pins values at definition time #
     # ------------------------------------------------------------------ #
     @mcp_tool(name=fq_name, description=description)
     async def _proxy_wrapper(
