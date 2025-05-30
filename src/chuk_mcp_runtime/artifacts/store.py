@@ -6,10 +6,12 @@ Asynchronous, object-store-backed artefact manager (aioboto3 ≥ 12).
 Highlights
 ──────────
 • Pure-async: every S3 call is wrapped in `async with s3_factory() as s3`.
-• Back-end agnostic: set ARTIFACT_PROVIDER=s3 / ibm_cos / … or inject a factory.
+• Back-end agnostic: set ARTIFACT_PROVIDER=memory/s3/ibm_cos/… or inject a factory.
 • Metadata cached via session provider abstraction (Redis, memory, etc.).
 • Presigned URLs on demand, configurable TTL for both data & metadata.
 • Enhanced error handling, logging, and operational features.
+• Memory defaults: both storage and session use memory by default for zero-config setup.
+• Auto .env loading: automatically loads .env files so consumers don't need to.
 """
 
 from __future__ import annotations
@@ -24,6 +26,17 @@ try:
 except ImportError as e:
     raise ImportError(f"Required dependency missing: {e}. Install with: pip install aioboto3") from e
 
+# Auto-load .env files if python-dotenv is available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # Load .env from current directory and parent directories
+    logger = logging.getLogger(__name__)
+    logger.debug("Loaded environment variables from .env file")
+except ImportError:
+    # python-dotenv not installed, continue without it
+    logger = logging.getLogger(__name__)
+    logger.debug("python-dotenv not available, skipping .env file loading")
+
 # Configure structured logging
 logger = logging.getLogger(__name__)
 
@@ -37,13 +50,13 @@ _DEFAULT_PRESIGN_EXPIRES = 3600  # seconds (1 hour for presigned URLs)
 def _default_storage_factory() -> Callable[[], AsyncContextManager]:
     """Return a zero-arg callable that yields an async ctx-mgr S3 client."""
     from .provider_factory import factory_for_env
-    return factory_for_env()  # This already calls the provider factory and returns the function
+    return factory_for_env()  # Defaults to memory provider
 
 
 def _default_session_factory() -> Callable[[], AsyncContextManager]:
     """Return a zero-arg callable that yields an async ctx-mgr session store."""
     from ..session.provider_factory import factory_for_env
-    return factory_for_env()  # This already calls the provider's factory()
+    return factory_for_env()  # Defaults to memory provider
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -89,11 +102,11 @@ class ArtifactStore:
     s3_factory : Callable[[], AsyncContextManager], optional
         Custom S3 client factory
     storage_provider : str, optional   
-        Storage provider name (looked up under artifacts.providers.<n>.factory)
+        Storage provider name (memory, s3, ibm_cos, filesystem, etc.)
     session_factory : Callable[[], AsyncContextManager], optional
         Custom session store factory
     session_provider : str, optional
-        Session provider name (redis, memory, etc.)
+        Session provider name (memory, redis, etc.)
     max_retries : int, optional
         Maximum retry attempts for storage operations (default: 3)
         
@@ -101,6 +114,8 @@ class ArtifactStore:
     -----
     Uses session provider abstraction instead of direct Redis connection.
     This allows for pluggable metadata storage (Redis, memory, etc.).
+    
+    Defaults to memory for both storage and session providers for zero-config setup.
     """
 
     def __init__(
@@ -116,10 +131,10 @@ class ArtifactStore:
         redis_url: Optional[str] = None,
         provider: Optional[str] = None,
     ):
-        # Read from environment variables with sensible defaults
+        # Read from environment variables with memory as defaults
         bucket = bucket or os.getenv("ARTIFACT_BUCKET", "mcp-bucket")
-        storage_provider = storage_provider or os.getenv("ARTIFACT_PROVIDER", "ibm_cos")
-        session_provider = session_provider or os.getenv("SESSION_PROVIDER", "redis")
+        storage_provider = storage_provider or os.getenv("ARTIFACT_PROVIDER", "memory")
+        session_provider = session_provider or os.getenv("SESSION_PROVIDER", "memory")
         
         # Handle backward compatibility
         if redis_url is not None:
@@ -131,7 +146,7 @@ class ArtifactStore:
                 stacklevel=2
             )
             os.environ["SESSION_REDIS_URL"] = redis_url  # Force set, don't use setdefault
-            session_provider = session_provider or "redis"
+            session_provider = "redis"  # Force redis when redis_url is provided
             
         if provider is not None:
             import warnings
@@ -140,7 +155,7 @@ class ArtifactStore:
                 DeprecationWarning,
                 stacklevel=2
             )
-            storage_provider = storage_provider or provider
+            storage_provider = provider
 
         # Validate factory/provider combinations
         if s3_factory and storage_provider:
@@ -166,8 +181,8 @@ class ArtifactStore:
 
         self.bucket = bucket
         self.max_retries = max_retries
-        self._storage_provider_name = storage_provider or "default"
-        self._session_provider_name = session_provider or "default"
+        self._storage_provider_name = storage_provider or "memory"
+        self._session_provider_name = session_provider or "memory"
         self._closed = False
 
         logger.info(

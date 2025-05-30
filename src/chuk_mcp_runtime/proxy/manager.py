@@ -48,7 +48,7 @@ def strip_proxy_prefix(name: str) -> str:
 
 # ───────────────────────── manager ──────────────────────────
 class ProxyServerManager:
-    """Spin up MCP side‑cars and expose their tools locally."""
+    """Spin up MCP side-cars and expose their tools locally."""
 
     def __init__(self, cfg: Dict[str, Any], project_root: str):
         pxy = cfg.get("proxy", {})
@@ -137,12 +137,12 @@ class ProxyServerManager:
                 dotted_ns = f"{self.ns_root}.{server}"
                 dotted_full = f"{dotted_ns}.{tool_name}"
 
-                # 1) Always create internal dot‑wrapper
+                # 1) Always create internal dot-wrapper
                 wrapper = await create_proxy_tool(dotted_ns, tool_name, self.stream_manager, meta)
                 self.running[server]["wrappers"][tool_name] = wrapper
 
                 if self.openai_mode:
-                    # Remove dot‑wrapper from public registry
+                    # Remove dot-wrapper from public registry
                     TOOLS_REGISTRY.pop(dotted_full, None)
 
                     # Build underscore alias once
@@ -154,7 +154,7 @@ class ProxyServerManager:
                         TOOLS_REGISTRY[under_name] = alias
                         self.openai_wrappers[under_name] = alias
                         logger.debug("Registered underscore wrapper: %s", under_name)
-                # else (non‑OpenAI mode) → keep dot wrapper; no underscore alias
+                # else (non-OpenAI mode) → keep dot wrapper; no underscore alias
 
         dot = [k for k in TOOLS_REGISTRY if "." in k]
         under = [k for k in TOOLS_REGISTRY if "_" in k and "." not in k]

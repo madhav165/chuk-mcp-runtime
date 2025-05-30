@@ -1,83 +1,53 @@
 # -*- coding: utf-8 -*-
-# chuk_mcp_runtime/artifacts/provider_factory.py
+# chuk_mcp_runtime/session/provider_factory.py
 """
-Resolve the storage back-end requested via **ARTIFACT_PROVIDER**.
+Resolve the session storage back-end requested via **SESSION_PROVIDER**.
 
 Built-in providers
 ──────────────────
-• **memory** (default) - in-process, non-persistent store (unit tests, demos)
-• **fs**, **filesystem** - local filesystem rooted at `$ARTIFACT_FS_ROOT`
-• **s3** - plain AWS or any S3-compatible endpoint
-• **ibm_cos** - IBM COS, HMAC credentials (Signature V2)
-• **ibm_cos_iam** - IBM COS, IAM API-key / OAuth signature
+• **memory** (default) - in-process, TTL-aware dict store
+• **redis** - Redis-backed persistent session store
 
 Any other value is resolved dynamically as
-`chuk_mcp_runtime.artifacts.providers.<name>.factory()`.
+`chuk_mcp_runtime.session.providers.<name>.factory()`.
 """
 
 from __future__ import annotations
 
-import os, aioboto3
+import os
 from importlib import import_module
 from typing import Callable, AsyncContextManager
 
 __all__ = ["factory_for_env"]
 
-# ──────────────────────────────────────────────────────────────────
-# Internal helper – generic AWS/S3‑compatible factory
-# ──────────────────────────────────────────────────────────────────
-
-def _aws_factory() -> Callable[[], AsyncContextManager]:
-    """Return a factory producing an *async‑context* aioboto3 S3 client."""
-
-    def _make():
-        session = aioboto3.Session()
-        return session.client(
-            "s3",
-            endpoint_url=os.getenv("S3_ENDPOINT_URL"),
-            region_name=os.getenv("AWS_REGION", "us‑east‑1"),
-            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-        )
-
-    return _make
-
-
-# ──────────────────────────────────────────────────────────────────
-# Public factory selector
-# ──────────────────────────────────────────────────────────────────
 
 def factory_for_env() -> Callable[[], AsyncContextManager]:
-    """Return a provider‑specific factory based on `$ARTIFACT_PROVIDER`."""
+    """Return a session provider factory based on `$SESSION_PROVIDER`."""
 
-    provider = os.getenv("ARTIFACT_PROVIDER", "memory").lower()
+    provider = os.getenv("SESSION_PROVIDER", "memory").lower()
 
-    # Fast paths for the built‑ins ------------------------------------------------
+    # Fast paths for built-ins
     if provider in ("memory", "mem", "inmemory"):
-        from .providers import memory
-        return memory.factory()
+        from .providers import memory_store
+        return memory_store.factory()
 
-    if provider in ("fs", "filesystem"):
-        from .providers import filesystem
-        return filesystem.factory()
+    if provider in ("redis", "redis_store"):
+        from .providers import redis_store
+        return redis_store.factory()
 
-    if provider == "s3":
-        return _aws_factory()
-
-    if provider == "ibm_cos":
-        from .providers import ibm_cos
-        return ibm_cos.factory()  # returns the zero‑arg factory callable
-
-    if provider == "ibm_cos_iam":
-        from .providers import ibm_cos_iam
-        return ibm_cos_iam.factory  # note: function itself is already the factory
-
-    # ---------------------------------------------------------------------------
-    # Fallback: dynamic lookup – allows user‑supplied provider implementations.
-    # ---------------------------------------------------------------------------
-    mod = import_module(f"chuk_mcp_runtime.artifacts.providers.{provider}")
+    # Dynamic lookup for custom providers
+    mod = import_module(f"chuk_mcp_runtime.session.providers.{provider}")
     if not hasattr(mod, "factory"):
         raise AttributeError(
-            f"Provider '{provider}' lacks a factory() function"
+            f"Session provider '{provider}' lacks a factory() function"
         )
-    return mod.factory  # ← NO parentheses – we return the factory itself
+    
+    # For dynamic providers, call factory() to get the actual factory function
+    factory_func = mod.factory
+    if callable(factory_func):
+        try:
+            return factory_func()
+        except TypeError:
+            # If it's already the factory function, return it directly
+            return factory_func
+    return factory_func

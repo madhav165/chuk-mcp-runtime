@@ -71,9 +71,9 @@ async def _alias({arg_sig}):
 # ─────────────────── public wrapper builder ─────────────────────
 
 async def create_openai_compatible_wrapper(original_name: str, original_func: Callable) -> Optional[Callable]:
-    """Return a wrapper with an OpenAI‑safe name *and* real signature."""
+    """Return a wrapper with an OpenAI-safe name *and* real signature."""
 
-    # Priority 1: metadata from remote MCP list‑tools
+    # Priority 1: metadata from remote MCP list-tools
     meta_dict: Optional[Dict[str, Any]] = getattr(original_func, "_proxy_metadata", None)
     schema: Dict[str, Any]
     description: str
@@ -104,7 +104,7 @@ async def create_openai_compatible_wrapper(original_name: str, original_func: Ca
 
 # ─────────────────── adapter class (async version) ─────────────
 class OpenAIToolsAdapter:
-    """Expose registry in an OpenAI‑friendly way and allow execution."""
+    """Expose registry in an OpenAI-friendly way and allow execution."""
 
     def __init__(self, registry: Optional[Dict[str, Any]] = None):
         self.registry = registry or TOOLS_REGISTRY
