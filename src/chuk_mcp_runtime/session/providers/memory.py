@@ -28,6 +28,11 @@ class _MemorySession:
                 return None
             return value
 
+    async def delete(self, key: str):
+        """Delete a key from memory cache."""
+        async with _MemorySession._LOCK:
+            return _MemorySession._cache.pop(key, None) is not None
+
     async def close(self):
         # nothing to do – kept for symmetry
         pass

@@ -7,23 +7,22 @@ Highlights
 ──────────
 • Pure-async: every S3 call is wrapped in `async with s3_factory() as s3`.
 • Back-end agnostic: set ARTIFACT_PROVIDER=s3 / ibm_cos / … or inject a factory.
-• Metadata cached in Redis, keyed **only** by `artifact_id`.
+• Metadata cached via session provider abstraction (Redis, memory, etc.).
 • Presigned URLs on demand, configurable TTL for both data & metadata.
 • Enhanced error handling, logging, and operational features.
 """
 
 from __future__ import annotations
 
-import os, uuid, json, hashlib, ssl, time, logging
+import os, uuid, json, hashlib, time, logging, asyncio
 from datetime import datetime
 from types import ModuleType
 from typing import Any, Dict, List, Callable, AsyncContextManager, Optional, Union
 
 try:
     import aioboto3
-    import redis.asyncio as aioredis
 except ImportError as e:
-    raise ImportError(f"Required dependencies missing: {e}. Install with: pip install aioboto3 redis") from e
+    raise ImportError(f"Required dependency missing: {e}. Install with: pip install aioboto3") from e
 
 # Configure structured logging
 logger = logging.getLogger(__name__)
@@ -33,12 +32,18 @@ _DEFAULT_TTL = 900  # seconds (15 minutes for metadata)
 _DEFAULT_PRESIGN_EXPIRES = 3600  # seconds (1 hour for presigned URLs)
 
 # ─────────────────────────────────────────────────────────────────────
-# Default factory (AWS env or any generic S3 endpoint)
+# Default factories
 # ─────────────────────────────────────────────────────────────────────
-def _default_factory() -> Callable[[], AsyncContextManager]:
+def _default_storage_factory() -> Callable[[], AsyncContextManager]:
     """Return a zero-arg callable that yields an async ctx-mgr S3 client."""
     from .provider_factory import factory_for_env
-    return factory_for_env()
+    return factory_for_env()  # This already calls the provider factory and returns the function
+
+
+def _default_session_factory() -> Callable[[], AsyncContextManager]:
+    """Return a zero-arg callable that yields an async ctx-mgr session store."""
+    from ..session.provider_factory import factory_for_env
+    return factory_for_env()  # This already calls the provider's factory()
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -67,60 +72,110 @@ class ProviderError(ArtifactStoreError):
     pass
 
 
+class SessionError(ArtifactStoreError):
+    """Raised when the session provider encounters an error."""
+    pass
+
+
 # ─────────────────────────────────────────────────────────────────────
 class ArtifactStore:
     """
-    Asynchronous artifact storage with Redis metadata caching.
+    Asynchronous artifact storage with session provider abstraction.
     
     Parameters
     ----------
     bucket : str
         Storage bucket/container name
-    redis_url : str   
-        Redis connection URL (redis:// or rediss://)
     s3_factory : Callable[[], AsyncContextManager], optional
         Custom S3 client factory
-    provider : str, optional   
-        Provider name (looked up under artifacts.providers.<name>.factory)
+    storage_provider : str, optional   
+        Storage provider name (looked up under artifacts.providers.<n>.factory)
+    session_factory : Callable[[], AsyncContextManager], optional
+        Custom session store factory
+    session_provider : str, optional
+        Session provider name (redis, memory, etc.)
     max_retries : int, optional
         Maximum retry attempts for storage operations (default: 3)
+        
+    Notes
+    -----
+    Uses session provider abstraction instead of direct Redis connection.
+    This allows for pluggable metadata storage (Redis, memory, etc.).
     """
 
     def __init__(
         self,
         *,
-        bucket: str,
-        redis_url: str,
+        bucket: Optional[str] = None,
         s3_factory: Optional[Callable[[], AsyncContextManager]] = None,
-        provider: Optional[str] = None,
+        storage_provider: Optional[str] = None,
+        session_factory: Optional[Callable[[], AsyncContextManager]] = None,
+        session_provider: Optional[str] = None,
         max_retries: int = 3,
+        # Backward compatibility - deprecated but still supported
+        redis_url: Optional[str] = None,
+        provider: Optional[str] = None,
     ):
-        if s3_factory and provider:
-            raise ValueError("Specify either s3_factory or provider—not both")
+        # Read from environment variables with sensible defaults
+        bucket = bucket or os.getenv("ARTIFACT_BUCKET", "mcp-bucket")
+        storage_provider = storage_provider or os.getenv("ARTIFACT_PROVIDER", "ibm_cos")
+        session_provider = session_provider or os.getenv("SESSION_PROVIDER", "redis")
+        
+        # Handle backward compatibility
+        if redis_url is not None:
+            import warnings
+            warnings.warn(
+                "redis_url parameter is deprecated. Use session_provider='redis' "
+                "and set SESSION_REDIS_URL environment variable instead.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+            os.environ["SESSION_REDIS_URL"] = redis_url  # Force set, don't use setdefault
+            session_provider = session_provider or "redis"
+            
+        if provider is not None:
+            import warnings
+            warnings.warn(
+                "provider parameter is deprecated. Use storage_provider instead.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+            storage_provider = storage_provider or provider
 
+        # Validate factory/provider combinations
+        if s3_factory and storage_provider:
+            raise ValueError("Specify either s3_factory or storage_provider—not both")
+        if session_factory and session_provider:
+            raise ValueError("Specify either session_factory or session_provider—not both")
+
+        # Initialize storage factory
         if s3_factory:
             self._s3_factory = s3_factory
-        elif provider:
-            self._s3_factory = self._load_provider(provider)
+        elif storage_provider:
+            self._s3_factory = self._load_storage_provider(storage_provider)
         else:
-            self._s3_factory = _default_factory()
+            self._s3_factory = _default_storage_factory()
+
+        # Initialize session factory
+        if session_factory:
+            self._session_factory = session_factory
+        elif session_provider:
+            self._session_factory = self._load_session_provider(session_provider)
+        else:
+            self._session_factory = _default_session_factory()
 
         self.bucket = bucket
         self.max_retries = max_retries
-        self._provider_name = provider or "default"
+        self._storage_provider_name = storage_provider or "default"
+        self._session_provider_name = session_provider or "default"
         self._closed = False
-
-        # Configure Redis connection
-        tls_insecure = os.getenv("REDIS_TLS_INSECURE", "0") == "1"
-        redis_kwargs = {"ssl_cert_reqs": ssl.CERT_NONE} if tls_insecure else {}
-        self._redis = aioredis.from_url(redis_url, decode_responses=True, **redis_kwargs)
 
         logger.info(
             "ArtifactStore initialized",
             extra={
                 "bucket": bucket,
-                "provider": self._provider_name,
-                "redis_url": redis_url.split("@")[-1] if "@" in redis_url else redis_url,  # Hide credentials
+                "storage_provider": self._storage_provider_name,
+                "session_provider": self._session_provider_name,
             }
         )
 
@@ -168,7 +223,7 @@ class ArtifactStore:
         ------
         ProviderError
             If storage operation fails
-        ArtifactStoreError
+        SessionError
             If metadata caching fails
         """
         if self._closed:
@@ -197,11 +252,14 @@ class ArtifactStore:
                 "sha256": hashlib.sha256(data).hexdigest(),
                 "stored_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
                 "ttl": ttl,
-                "provider": self._provider_name,
+                "storage_provider": self._storage_provider_name,
+                "session_provider": self._session_provider_name,
             }
 
-            # Cache metadata in Redis
-            await self._redis.setex(artifact_id, ttl, json.dumps(record))
+            # Cache metadata using session provider
+            session_ctx_mgr = self._session_factory()
+            async with session_ctx_mgr as session:
+                await session.setex(artifact_id, ttl, json.dumps(record))
 
             duration_ms = int((time.time() - start_time) * 1000)
             logger.info(
@@ -211,7 +269,7 @@ class ArtifactStore:
                     "bytes": len(data),
                     "mime": mime,
                     "duration_ms": duration_ms,
-                    "provider": self._provider_name,
+                    "storage_provider": self._storage_provider_name,
                 }
             )
 
@@ -225,13 +283,13 @@ class ArtifactStore:
                     "artifact_id": artifact_id,
                     "error": str(e),
                     "duration_ms": duration_ms,
-                    "provider": self._provider_name,
+                    "storage_provider": self._storage_provider_name,
                 },
                 exc_info=True
             )
             
-            if "redis" in str(e).lower():
-                raise ArtifactStoreError(f"Metadata caching failed: {e}") from e
+            if "session" in str(e).lower() or "redis" in str(e).lower():
+                raise SessionError(f"Metadata caching failed: {e}") from e
             else:
                 raise ProviderError(f"Storage operation failed: {e}") from e
 
@@ -241,7 +299,8 @@ class ArtifactStore:
         
         for attempt in range(self.max_retries):
             try:
-                async with self._s3_factory() as s3:
+                storage_ctx_mgr = self._s3_factory()
+                async with storage_ctx_mgr as s3:
                     await s3.put_object(
                         Bucket=self.bucket,
                         Key=key,
@@ -294,9 +353,20 @@ class ArtifactStore:
         try:
             record = await self._get_record(artifact_id)
             
-            async with self._s3_factory() as s3:
+            storage_ctx_mgr = self._s3_factory()
+            async with storage_ctx_mgr as s3:
                 response = await s3.get_object(Bucket=self.bucket, Key=record["key"])
-                data = response["Body"]
+                
+                # Handle different response formats from different providers
+                if hasattr(response["Body"], "read"):
+                    # For aioboto3, Body is a StreamingBody
+                    data = await response["Body"].read()
+                elif isinstance(response["Body"], bytes):
+                    # For some providers, Body is already bytes
+                    data = response["Body"]
+                else:
+                    # Convert to bytes if needed
+                    data = bytes(response["Body"])
                 
                 # Verify integrity if SHA256 is available
                 if "sha256" in record:
@@ -367,7 +437,8 @@ class ArtifactStore:
         try:
             record = await self._get_record(artifact_id)
             
-            async with self._s3_factory() as s3:
+            storage_ctx_mgr = self._s3_factory()
+            async with storage_ctx_mgr as s3:
                 url = await s3.generate_presigned_url(
                     "get_object",
                     Params={"Bucket": self.bucket, "Key": record["key"]},
@@ -485,11 +556,20 @@ class ArtifactStore:
             record = await self._get_record(artifact_id)
             
             # Delete from object storage
-            async with self._s3_factory() as s3:
+            storage_ctx_mgr = self._s3_factory()
+            async with storage_ctx_mgr as s3:
                 await s3.delete_object(Bucket=self.bucket, Key=record["key"])
             
-            # Delete metadata from Redis
-            await self._redis.delete(artifact_id)
+            # Delete metadata from session store
+            session_ctx_mgr = self._session_factory()
+            async with session_ctx_mgr as session:
+                if hasattr(session, 'delete'):
+                    await session.delete(artifact_id)
+                else:
+                    logger.warning(
+                        "Session provider doesn't support delete operation",
+                        extra={"artifact_id": artifact_id, "provider": self._session_provider_name}
+                    )
             
             logger.info("Artifact deleted", extra={"artifact_id": artifact_id})
             return True
@@ -503,45 +583,6 @@ class ArtifactStore:
                 extra={"artifact_id": artifact_id, "error": str(e)}
             )
             raise ProviderError(f"Deletion failed: {e}") from e
-
-    async def list_by_session(self, session_id: str, limit: int = 100) -> List[Dict[str, Any]]:
-        """
-        List artifacts for a session (requires Redis SCAN).
-        
-        Parameters
-        ----------
-        session_id : str
-            Session identifier
-        limit : int, optional
-            Maximum number of artifacts to return
-            
-        Returns
-        -------
-        list
-            List of artifact metadata records
-        """
-        artifacts = []
-        cursor = 0
-        count = 0
-        
-        while count < limit:
-            cursor, keys = await self._redis.scan(cursor=cursor, match="*", count=50)
-            
-            for key in keys:
-                try:
-                    record = await self._get_record(key)
-                    if record.get("scope") == session_id:
-                        artifacts.append({**record, "artifact_id": key})
-                        count += 1
-                        if count >= limit:
-                            break
-                except (ArtifactNotFoundError, ArtifactExpiredError):
-                    continue
-                    
-            if cursor == 0:  # Full scan complete
-                break
-                
-        return artifacts
 
     # ─────────────────────────────────────────────────────────────────
     # Batch operations
@@ -569,15 +610,18 @@ class ArtifactStore:
         -------
         list
             List of artifact IDs
+            
+        Notes
+        -----
+        This method doesn't use session provider batching since our session
+        interface doesn't define batch operations. Each metadata record is
+        stored individually through the session provider.
         """
         if self._closed:
             raise ArtifactStoreError("Store has been closed")
             
         artifact_ids = []
         failed_items = []
-        
-        # Use Redis pipeline for metadata
-        pipe = self._redis.pipeline()
         
         for i, item in enumerate(items):
             try:
@@ -591,7 +635,7 @@ class ArtifactStore:
                     item.get("filename"), scope
                 )
                 
-                # Prepare metadata for pipeline
+                # Prepare metadata record
                 record = {
                     "scope": scope,
                     "key": key,
@@ -603,19 +647,21 @@ class ArtifactStore:
                     "sha256": hashlib.sha256(item["data"]).hexdigest(),
                     "stored_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
                     "ttl": ttl,
-                    "provider": self._provider_name,
+                    "storage_provider": self._storage_provider_name,
+                    "session_provider": self._session_provider_name,
                 }
                 
-                pipe.setex(artifact_id, ttl, json.dumps(record))
+                # Store metadata via session provider
+                session_ctx_mgr = self._session_factory()
+                async with session_ctx_mgr as session:
+                    await session.setex(artifact_id, ttl, json.dumps(record))
+                
                 artifact_ids.append(artifact_id)
                 
             except Exception as e:
                 logger.error(f"Batch item {i} failed: {e}")
                 failed_items.append(i)
                 artifact_ids.append(None)  # Placeholder
-        
-        # Execute Redis pipeline
-        await pipe.execute()
         
         if failed_items:
             logger.warning(f"Batch operation completed with {len(failed_items)} failures")
@@ -633,24 +679,53 @@ class ArtifactStore:
         Returns
         -------
         dict
-            Validation results for Redis and storage provider
+            Validation results for session provider and storage provider
         """
         results = {"timestamp": datetime.utcnow().isoformat() + "Z"}
         
-        # Test Redis connection
+        # Test session provider
         try:
-            await self._redis.ping()
-            results["redis"] = {"status": "ok", "url": str(self._redis.connection_pool.connection_kwargs.get("host", "unknown"))}
+            session_ctx_mgr = self._session_factory()
+            async with session_ctx_mgr as session:
+                # Test basic operations
+                test_key = f"test_{uuid.uuid4().hex}"
+                await session.setex(test_key, 10, "test_value")
+                value = await session.get(test_key)
+                
+                if value == "test_value":
+                    results["session"] = {
+                        "status": "ok", 
+                        "provider": self._session_provider_name
+                    }
+                else:
+                    results["session"] = {
+                        "status": "error", 
+                        "message": "Session store test failed",
+                        "provider": self._session_provider_name
+                    }
         except Exception as e:
-            results["redis"] = {"status": "error", "message": str(e)}
+            results["session"] = {
+                "status": "error", 
+                "message": str(e),
+                "provider": self._session_provider_name
+            }
         
         # Test storage provider
         try:
-            async with self._s3_factory() as s3:
+            storage_ctx_mgr = self._s3_factory()
+            async with storage_ctx_mgr as s3:
                 await s3.head_bucket(Bucket=self.bucket)
-            results["storage"] = {"status": "ok", "bucket": self.bucket, "provider": self._provider_name}
+            results["storage"] = {
+                "status": "ok", 
+                "bucket": self.bucket, 
+                "provider": self._storage_provider_name
+            }
         except Exception as e:
-            results["storage"] = {"status": "error", "message": str(e), "provider": self._provider_name}
+            results["storage"] = {
+                "status": "error", 
+                "message": str(e), 
+                "provider": self._storage_provider_name
+            }
         
         return results
 
@@ -661,16 +736,19 @@ class ArtifactStore:
         Returns
         -------
         dict
-            Statistics about stored artifacts
+            Statistics about the store
+            
+        Notes
+        -----
+        Statistics are limited since session providers don't expose
+        detailed metrics in a standardized way.
         """
-        # This is expensive for large stores - consider Redis counters in production
-        info = await self._redis.info()
-        
         return {
-            "redis_keys": info.get("db0", {}).get("keys", 0) if "db0" in info else 0,
-            "redis_memory_mb": round(info.get("used_memory", 0) / 1024 / 1024, 2),
-            "provider": self._provider_name,
+            "storage_provider": self._storage_provider_name,
+            "session_provider": self._session_provider_name,
             "bucket": self.bucket,
+            "max_retries": self.max_retries,
+            "closed": self._closed,
         }
 
     # ─────────────────────────────────────────────────────────────────
@@ -678,9 +756,8 @@ class ArtifactStore:
     # ─────────────────────────────────────────────────────────────────
 
     async def close(self):
-        """Clean up Redis connections and mark store as closed."""
+        """Mark store as closed."""
         if not self._closed:
-            await self._redis.close()
             self._closed = True
             logger.info("ArtifactStore closed")
 
@@ -694,24 +771,41 @@ class ArtifactStore:
     # Helper functions
     # ─────────────────────────────────────────────────────────────────
 
-    def _load_provider(self, name: str) -> Callable[[], AsyncContextManager]:
+    def _load_storage_provider(self, name: str) -> Callable[[], AsyncContextManager]:
         """Load storage provider by name."""
         from importlib import import_module
 
         try:
             mod: ModuleType = import_module(f"chuk_mcp_runtime.artifacts.providers.{name}")
         except ModuleNotFoundError as exc:
-            raise ValueError(f"Unknown provider '{name}'") from exc
+            raise ValueError(f"Unknown storage provider '{name}'") from exc
 
         if not hasattr(mod, "factory"):
-            raise AttributeError(f"Provider '{name}' lacks factory()")
+            raise AttributeError(f"Storage provider '{name}' lacks factory()")
         
-        logger.info(f"Loaded provider: {name}")
-        return mod.factory  # type: ignore[return-value]
+        logger.info(f"Loaded storage provider: {name}")
+        # For storage providers, factory() returns a factory function, so we call it
+        return mod.factory()  # type: ignore[return-value]
+
+    def _load_session_provider(self, name: str) -> Callable[[], AsyncContextManager]:
+        """Load session provider by name."""
+        from importlib import import_module
+
+        try:
+            mod: ModuleType = import_module(f"chuk_mcp_runtime.session.providers.{name}")
+        except ModuleNotFoundError as exc:
+            raise ValueError(f"Unknown session provider '{name}'") from exc
+
+        if not hasattr(mod, "factory"):
+            raise AttributeError(f"Session provider '{name}' lacks factory()")
+        
+        logger.info(f"Loaded session provider: {name}")
+        # Call the factory to get the actual context manager factory
+        return mod.factory()  # type: ignore[return-value]
 
     async def _get_record(self, artifact_id: str) -> Dict[str, Any]:
         """
-        Retrieve artifact metadata from Redis with enhanced error handling.
+        Retrieve artifact metadata from session provider with enhanced error handling.
         
         Parameters
         ----------
@@ -731,11 +825,15 @@ class ArtifactStore:
             If artifact has expired
         ArtifactCorruptedError
             If metadata is corrupted
+        SessionError
+            If session provider fails
         """
         try:
-            raw = await self._redis.get(artifact_id)
+            session_ctx_mgr = self._session_factory()
+            async with session_ctx_mgr as session:
+                raw = await session.get(artifact_id)
         except Exception as e:
-            raise ArtifactStoreError(f"Redis error retrieving {artifact_id}: {e}") from e
+            raise SessionError(f"Session provider error retrieving {artifact_id}: {e}") from e
         
         if raw is None:
             # Could be expired or never existed - we can't distinguish without additional metadata
@@ -745,6 +843,7 @@ class ArtifactStore:
             return json.loads(raw)
         except json.JSONDecodeError as e:
             logger.error(f"Corrupted metadata for artifact {artifact_id}: {e}")
-            # Clean up corrupted entry
-            await self._redis.delete(artifact_id)
+            # Note: We can't clean up corrupted entries since session providers
+            # don't expose delete in their interface. This would need to be
+            # handled by the session provider implementation.
             raise ArtifactCorruptedError(f"Corrupted metadata for artifact {artifact_id}") from e

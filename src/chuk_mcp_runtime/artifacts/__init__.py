@@ -9,6 +9,6 @@ Allows:
 """
 
 from .models import ArtifactEnvelope
-from .artifact_store import ArtifactStore
+from .store import ArtifactStore
 
 __all__ = ["ArtifactEnvelope", "ArtifactStore"]

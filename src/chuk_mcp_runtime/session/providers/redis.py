@@ -1,7 +1,7 @@
 # ===========================================================================
-# chuk_mcp_runtime/session/providers/redis.py
+# chuk_mcp_runtime/session/providers/redis_store.py
 # ===========================================================================
-"""Redis‑backed session store (wraps redis.asyncio)."""
+"""Redis-backed session store (wraps redis.asyncio)."""
 from __future__ import annotations
 
 import os, ssl, redis.asyncio as aioredis
@@ -22,6 +22,10 @@ class _RedisSession:
 
     async def get(self, key: str):
         return await self._r.get(key)
+
+    async def delete(self, key: str):
+        """Delete a key from Redis."""
+        return await self._r.delete(key)
 
     async def close(self):
         await self._r.close()
