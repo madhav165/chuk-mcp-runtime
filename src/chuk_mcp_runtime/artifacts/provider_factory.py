@@ -25,7 +25,7 @@ def _aws_factory() -> Callable[[], AsyncContextManager]:
         return session.client(
             "s3",
             endpoint_url=os.getenv("S3_ENDPOINT_URL"),
-            region_name=os.getenv("AWS_REGION", "us-east-1"),
+            region_name=os.getenv("AWS_REGION", "us-south"),
             aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
             aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
         )
@@ -39,14 +39,15 @@ def factory_for_env() -> Callable[[], AsyncContextManager]:
     Return a zero-arg factory for the provider named in ARTIFACT_PROVIDER.
 
     Built-ins:
-      • s3            (default) – generic AWS / MinIO / Wasabi …
-      • ibm_cos       – HMAC credentials
-      • ibm_cos_iam   – IAM API-key (oauth signature)
+      • s3            (default) - generic AWS / MinIO / Wasabi …
+      • ibm_cos       - HMAC credentials
+      • ibm_cos_iam   - IAM API-key (oauth signature)
+      • memory        - memory
 
     Anything else is resolved as
       chuk_mcp_runtime.artifacts.providers.<name>.factory
     """
-    provider = os.getenv("ARTIFACT_PROVIDER", "s3").lower()
+    provider = os.getenv("ARTIFACT_PROVIDER", "memory").lower()
 
     if provider == "s3":
         return _aws_factory()
