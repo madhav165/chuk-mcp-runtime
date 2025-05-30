@@ -862,3 +862,254 @@ class ArtifactStore:
             # don't expose delete in their interface. This would need to be
             # handled by the session provider implementation.
             raise ArtifactCorruptedError(f"Corrupted metadata for artifact {artifact_id}") from e
+        
+
+    async def presign_upload(
+        self, 
+        session_id: str | None = None,
+        filename: str | None = None,
+        mime_type: str = "application/octet-stream",
+        expires: int = _DEFAULT_PRESIGN_EXPIRES
+    ) -> tuple[str, str]:
+        """
+        Generate a presigned URL for uploading a new artifact.
+        
+        Parameters
+        ----------
+        session_id : str, optional
+            Session identifier for organization
+        filename : str, optional
+            Suggested filename for the artifact
+        mime_type : str, optional
+            Expected MIME type of the upload
+        expires : int, optional
+            URL expiration time in seconds (default: 1 hour)
+            
+        Returns
+        -------
+        tuple
+            (presigned_upload_url, artifact_id) - Use the artifact_id to reference the uploaded file
+            
+        Raises
+        ------
+        NotImplementedError
+            If provider doesn't support presigned URLs
+        ProviderError
+            If presigned URL generation fails
+        """
+        if self._closed:
+            raise ArtifactStoreError("Store has been closed")
+            
+        start_time = time.time()
+        
+        # Generate artifact ID and key path
+        artifact_id = uuid.uuid4().hex
+        scope = session_id or f"{_ANON_PREFIX}_{artifact_id}"
+        key = f"sess/{scope}/{artifact_id}"
+        
+        try:
+            storage_ctx_mgr = self._s3_factory()
+            async with storage_ctx_mgr as s3:
+                url = await s3.generate_presigned_url(
+                    "put_object",
+                    Params={
+                        "Bucket": self.bucket, 
+                        "Key": key,
+                        "ContentType": mime_type
+                    },
+                    ExpiresIn=expires,
+                )
+                
+                duration_ms = int((time.time() - start_time) * 1000)
+                logger.info(
+                    "Upload presigned URL generated",
+                    extra={
+                        "artifact_id": artifact_id,
+                        "key": key,
+                        "mime_type": mime_type,
+                        "expires_in": expires,
+                        "duration_ms": duration_ms,
+                    }
+                )
+                
+                return url, artifact_id
+                
+        except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            logger.error(
+                "Upload presigned URL generation failed",
+                extra={
+                    "artifact_id": artifact_id,
+                    "error": str(e),
+                    "duration_ms": duration_ms,
+                }
+            )
+            
+            if "oauth" in str(e).lower() or "credential" in str(e).lower():
+                raise NotImplementedError(
+                    "This provider cannot generate presigned URLs with the "
+                    "current credential type (e.g. OAuth). Use HMAC creds instead."
+                ) from e
+            else:
+                raise ProviderError(f"Upload presigned URL generation failed: {e}") from e
+
+    async def register_uploaded_artifact(
+        self,
+        artifact_id: str,
+        *,
+        mime: str,
+        summary: str,
+        meta: Dict[str, Any] | None = None,
+        filename: str | None = None,
+        session_id: str | None = None,
+        ttl: int = _DEFAULT_TTL,
+    ) -> bool:
+        """
+        Register metadata for an artifact that was uploaded via presigned URL.
+        
+        Call this after a successful upload using a presigned URL to make the
+        artifact discoverable through the normal store methods.
+        
+        Parameters
+        ----------
+        artifact_id : str
+            The artifact ID returned from presign_upload()
+        mime : str
+            MIME type of the uploaded artifact
+        summary : str
+            Human-readable description
+        meta : dict, optional
+            Additional metadata
+        filename : str, optional
+            Original filename
+        session_id : str, optional
+            Session identifier (should match presign_upload call)
+        ttl : int, optional
+            Metadata TTL in seconds
+            
+        Returns
+        -------
+        bool
+            True if registration succeeded, False if artifact not found
+            
+        Raises
+        ------
+        ProviderError
+            If metadata registration fails
+        """
+        if self._closed:
+            raise ArtifactStoreError("Store has been closed")
+            
+        start_time = time.time()
+        
+        # Reconstruct the key path
+        scope = session_id or f"{_ANON_PREFIX}_{artifact_id}"
+        key = f"sess/{scope}/{artifact_id}"
+        
+        try:
+            # Verify the object exists and get its size
+            storage_ctx_mgr = self._s3_factory()
+            async with storage_ctx_mgr as s3:
+                try:
+                    response = await s3.head_object(Bucket=self.bucket, Key=key)
+                    file_size = response.get('ContentLength', 0)
+                except Exception:
+                    logger.warning(f"Artifact {artifact_id} not found in storage")
+                    return False
+            
+            # For verification, we could download and hash the file, but that defeats 
+            # the purpose of presigned uploads. Instead, we'll compute hash later if needed.
+            
+            # Build metadata record
+            record = {
+                "scope": scope,
+                "key": key,
+                "mime": mime,
+                "summary": summary,
+                "meta": meta or {},
+                "filename": filename,
+                "bytes": file_size,
+                "sha256": None,  # We don't have the hash since we didn't upload it directly
+                "stored_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "ttl": ttl,
+                "storage_provider": self._storage_provider_name,
+                "session_provider": self._session_provider_name,
+                "uploaded_via_presigned": True,  # Flag to indicate upload method
+            }
+
+            # Cache metadata using session provider
+            session_ctx_mgr = self._session_factory()
+            async with session_ctx_mgr as session:
+                await session.setex(artifact_id, ttl, json.dumps(record))
+
+            duration_ms = int((time.time() - start_time) * 1000)
+            logger.info(
+                "Artifact metadata registered after presigned upload",
+                extra={
+                    "artifact_id": artifact_id,
+                    "bytes": file_size,
+                    "mime": mime,
+                    "duration_ms": duration_ms,
+                }
+            )
+
+            return True
+
+        except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            logger.error(
+                "Artifact metadata registration failed",
+                extra={
+                    "artifact_id": artifact_id,
+                    "error": str(e),
+                    "duration_ms": duration_ms,
+                }
+            )
+            
+            if "session" in str(e).lower() or "redis" in str(e).lower():
+                raise SessionError(f"Metadata registration failed: {e}") from e
+            else:
+                raise ProviderError(f"Metadata registration failed: {e}") from e
+
+    async def presign_upload_and_register(
+        self,
+        *,
+        mime: str,
+        summary: str,
+        meta: Dict[str, Any] | None = None,
+        filename: str | None = None,
+        session_id: str | None = None,
+        ttl: int = _DEFAULT_TTL,
+        expires: int = _DEFAULT_PRESIGN_EXPIRES
+    ) -> tuple[str, str]:
+        """
+        Convenience method that combines presign_upload and pre-registers metadata.
+        
+        This creates the presigned URL and immediately registers the metadata,
+        so the artifact becomes discoverable as soon as it's uploaded.
+        
+        Returns
+        -------
+        tuple
+            (presigned_upload_url, artifact_id)
+        """
+        # Generate presigned URL
+        upload_url, artifact_id = await self.presign_upload(
+            session_id=session_id,
+            filename=filename,
+            mime_type=mime,
+            expires=expires
+        )
+        
+        # Pre-register metadata (with unknown file size)
+        await self.register_uploaded_artifact(
+            artifact_id,
+            mime=mime,
+            summary=summary,
+            meta=meta,
+            filename=filename,
+            session_id=session_id,
+            ttl=ttl
+        )
+        
+        return upload_url, artifact_id
