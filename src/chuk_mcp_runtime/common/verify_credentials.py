@@ -5,7 +5,7 @@ JWT-based credential validation for the CHUK MCP runtime.
 * Reads secret, allowed algorithms, and leeway from env vars
   - defaults are safe but test-friendly.
 * Adds a small leeway so that fractional-second ``exp`` values created
-  with ``datetime.utcnow().timestamp()`` don’t fail validation by a
+  with ``datetime.utcnow().timestamp()`` don't fail validation by a
   couple of milliseconds.
 """
 

@@ -127,7 +127,7 @@ def get_current_time(timezone: str = "UTC") -> str:
     import pytz
     
     tz = pytz.timezone(timezone)
-    now = datetime.now(tz)
+    now = datetime.now(tz)  
     return now.strftime("%Y-%m-%d %H:%M:%S %Z")
 ```
 

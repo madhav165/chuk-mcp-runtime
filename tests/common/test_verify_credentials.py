@@ -8,7 +8,7 @@ import jwt
 import time
 import os
 from unittest.mock import patch
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from starlette.exceptions import HTTPException
 from starlette.status import HTTP_401_UNAUTHORIZED
@@ -28,7 +28,7 @@ def valid_token():
         "sub": "test-user",
         "name": "Test User",
         "role": "admin",
-        "iat": datetime.utcnow().timestamp()
+        "iat": datetime.now(timezone.utc) - timedelta(hours=1)
     }
     return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
@@ -39,7 +39,7 @@ def expired_token():
         "sub": "test-user",
         "name": "Test User",
         "role": "admin",
-        "exp": datetime.utcnow() - timedelta(hours=1)
+        "exp": datetime.now(timezone.utc) - timedelta(hours=1)
     }
     return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
@@ -50,7 +50,7 @@ def token_with_expiration():
         "sub": "test-user",
         "name": "Test User",
         "role": "admin",
-        "exp": (datetime.utcnow() + timedelta(hours=1)).timestamp()
+        "exp": int(time.time()) + 3600 
     }
     return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
