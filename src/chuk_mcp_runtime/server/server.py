@@ -1,9 +1,11 @@
 # chuk_mcp_runtime/server/server.py
 """
-CHUK MCP Server Module - Async Native Implementation
+CHUK MCP Server Module
 
-This module provides the core CHUK MCP server functionality for 
-running tools and managing server operations.
+This module provides the core CHUK MCP server functionality with
+session context management and automatic session injection.
+
+Simplified version - LLMs handle session context directly through tools.
 """
 import asyncio
 import json
@@ -12,7 +14,7 @@ import importlib
 from typing import Dict, Any, List, Optional, Union, Callable
 import re
 
-# MCP imports (assuming these are from an external package)
+# MCP imports
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.server.sse import SseServerTransport
@@ -32,6 +34,12 @@ from chuk_mcp_runtime.server.logging_config import get_logger
 from chuk_mcp_runtime.common.mcp_tool_decorator import TOOLS_REGISTRY, initialize_tool_registry
 from chuk_mcp_runtime.common.verify_credentials import validate_token
 from chuk_mcp_runtime.common.tool_naming import resolve_tool_name, update_naming_maps
+from chuk_mcp_runtime.session.session_management import (
+    set_session_context,
+    get_session_context,
+    clear_session_context,
+    SessionError
+)
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -84,7 +92,6 @@ class AuthMiddleware:
         try:
             payload = await validate_token(token)
             scope["user"] = payload
-            # return await response(scope, receive, send)
         except HTTPException as ex:
             response = JSONResponse(
                 {"error": ex.detail},
@@ -98,9 +105,9 @@ class AuthMiddleware:
 
 class MCPServer:
     """
-    Manages the MCP (Messaging Control Protocol) server operations.
+    Manages the MCP (Messaging Control Protocol) server operations with session support.
     
-    Handles tool discovery, registration, and execution.
+    Handles tool discovery, registration, execution, and session management.
     """
     def __init__(
         self,
@@ -124,6 +131,9 @@ class MCPServer:
         
         # Tools registry
         self.tools_registry = tools_registry or TOOLS_REGISTRY
+        
+        # Session management
+        self.current_session: Optional[str] = None
         
         # Update the tool naming maps to ensure resolution works correctly
         update_naming_maps()
@@ -172,11 +182,41 @@ class MCPServer:
         
         return tools_registry
     
+    async def _inject_session_context(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Inject session context into tool arguments if needed.
+        
+        Args:
+            tool_name: Name of the tool being called
+            arguments: Current tool arguments
+            
+        Returns:
+            Updated arguments with session context if applicable
+        """
+        # Tools that require session context
+        session_required_tools = [
+            'write_file', 'upload_file', 'list_session_files', 'list_directory'
+        ]
+        
+        # Check if this tool needs session context and doesn't have session_id
+        needs_session = any(pattern in tool_name for pattern in session_required_tools)
+        
+        if needs_session and 'session_id' not in arguments:
+            # Use current session context if available
+            if self.current_session:
+                arguments = arguments.copy()  # Don't modify original
+                arguments['session_id'] = self.current_session
+                self.logger.debug(f"Injected session_id '{self.current_session}' into {tool_name}")
+            else:
+                self.logger.warning(f"Tool '{tool_name}' may require session_id but none available")
+        
+        return arguments
+
     async def serve(self, custom_handlers: Optional[Dict[str, Callable]] = None) -> None:
         """
         Run the MCP server with stdio communication.
         
-        Sets up server, tool listing, and tool execution handlers.
+        Sets up server, tool listing, and tool execution handlers with session support.
         
         Args:
             custom_handlers: Optional dictionary of custom handlers to add to the server.
@@ -217,23 +257,9 @@ class MCPServer:
             arguments: Dict[str, Any]
         ) -> List[Union[TextContent, ImageContent, EmbeddedResource]]:
             """
-            Execute a tool.
+            Execute a tool with session context support.
 
-            Typical CLI calls deliver exactly the registered tool name
-            (e.g. ``duckduckgo_search``).  But when the CLI uses the
-            “server.tool” syntax, the front-end splits that into
-            ``server = duckduckgo`` and ``name = search`` before it
-            reaches us.  That used to raise “Tool 'search' not found”.
-
-            The resolver below tries four strategies in order:
-
-            1. direct lookup                           (fast path)
-            2. compatibility-mapper (`resolve_tool_name`)
-            3. *unique* suffix match  “…_{name}”
-            4. *unique* suffix match  “….{name}”
-
-            If more than one candidate matches a suffix we *fail fast*
-            with a clear error so ambiguity is never silent.
+            Enhanced with session management and improved tool resolution.
             """
             registry = self.tools_registry
 
@@ -257,12 +283,31 @@ class MCPServer:
                 raise ValueError(f"Tool not found: {name}")
 
             func = registry[resolved]
-            self.logger.debug("Executing '%s' with %s", resolved, arguments)
+            
+            # Enhanced: Inject session context for tools that need it
+            enhanced_arguments = await self._inject_session_context(resolved, arguments)
+            
+            self.logger.debug("Executing '%s' with %s", resolved, enhanced_arguments)
             try:
-                result = await func(**arguments)
+                # Set session context if available
+                if self.current_session:
+                    set_session_context(self.current_session)
+                
+                result = await func(**enhanced_arguments)
+                
+                # IMPORTANT: Update the server's session if the tool changed it
+                # This allows tools like set_session to persist their changes
+                current_context = get_session_context()
+                if current_context and current_context != self.current_session:
+                    self.current_session = current_context
+                
             except Exception as exc:
                 self.logger.error("Tool '%s' failed: %s", resolved, exc, exc_info=True)
                 raise ValueError(f"Error processing tool '{resolved}': {exc}") from exc
+            finally:
+                # DON'T clear session context - let it persist between calls
+                # The session context should maintain state across tool executions
+                pass
 
             # ---------- normalise result to MCP content ----------
             if (
@@ -286,11 +331,11 @@ class MCPServer:
         server_type = self.config.get("server", {}).get("type", "stdio")
         
         if server_type == "stdio":
-            self.logger.info("Starting stdio server")
+            self.logger.info("Starting stdio server with session support")
             async with stdio_server() as (read_stream, write_stream):
                 await server.run(read_stream, write_stream, options)
         elif server_type == "sse":
-            self.logger.info("Starting MCP server over SSE")
+            self.logger.info("Starting MCP server over SSE with session support")
             # Get SSE server configuration
             sse_config = self.config.get("sse", {})
             host = sse_config.get("host", "127.0.0.1")
@@ -324,13 +369,11 @@ class MCPServer:
                 auth=self.config.get("server", {}).get("auth", None)
             )
             
-            # uvicorn.run(starlette_app, host="0.0.0.0", port=port)
             config = uvicorn.Config(starlette_app, host=host, port=port, log_level="info")
             uvicorn_server = uvicorn.Server(config)
             await uvicorn_server.serve()
         else:
             raise ValueError(f"Unknown server type: {server_type}")
-
 
     async def register_tool(self, name: str, func: Callable) -> None:
         """
@@ -358,3 +401,23 @@ class MCPServer:
             List of tool names.
         """
         return list(self.tools_registry.keys())
+    
+    def set_session(self, session_id: str) -> None:
+        """
+        Set the current session for this server instance.
+        
+        Args:
+            session_id: Session identifier
+        """
+        self.current_session = session_id
+        set_session_context(session_id)
+        self.logger.info(f"Server session set to: {session_id}")
+    
+    def get_current_session(self) -> Optional[str]:
+        """
+        Get the current session ID.
+        
+        Returns:
+            Current session ID or None
+        """
+        return self.current_session
