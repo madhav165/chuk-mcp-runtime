@@ -21,6 +21,7 @@ dependencies = [
   "aioboto3>=14.3.0",
   "redis>=6.2.0",
   "ibm-cos-sdk>=2.13.5",
+  "chuk-sessions>=0.1.0",
 ]
 
 [project.optional-dependencies]

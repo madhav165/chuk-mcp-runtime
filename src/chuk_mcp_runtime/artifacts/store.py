@@ -55,7 +55,7 @@ def _default_storage_factory() -> Callable[[], AsyncContextManager]:
 
 def _default_session_factory() -> Callable[[], AsyncContextManager]:
     """Return a zero-arg callable that yields an async ctx-mgr session store."""
-    from ..session.provider_factory import factory_for_env
+    from chuk_sessions.provider_factory import factory_for_env
     return factory_for_env()  # Defaults to memory provider
 
 
@@ -807,7 +807,7 @@ class ArtifactStore:
         from importlib import import_module
 
         try:
-            mod: ModuleType = import_module(f"chuk_mcp_runtime.session.providers.{name}")
+            mod: ModuleType = import_module(f"chuk_sessions.providers.{name}")
         except ModuleNotFoundError as exc:
             raise ValueError(f"Unknown session provider '{name}'") from exc
 
