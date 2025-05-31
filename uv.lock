@@ -316,6 +316,23 @@ wheels = [
 ]
 
 [[package]]
+name = "chuk-artifacts"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aioboto3" },
+    { name = "chuk-sessions" },
+    { name = "chuk-tool-processor" },
+    { name = "ibm-cos-sdk" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "redis" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3d/6b/c55b79bf72f98e8b1673e674619efc2d060c1caef9c16355f3b151d99152/chuk_artifacts-0.1.0-py3-none-any.whl", hash = "sha256:d037dc2607c522d88d50ac07600d385c4ce0c1b6826fadef1ded17b9c2a089d6", size = 37533 },
+]
+
+[[package]]
 name = "chuk-mcp"
 version = "0.1.12"
 source = { registry = "https://pypi.org/simple" }
@@ -335,6 +352,7 @@ version = "0.1.34"
 source = { editable = "." }
 dependencies = [
     { name = "aioboto3" },
+    { name = "chuk-artifacts" },
     { name = "chuk-sessions" },
     { name = "chuk-tool-processor" },
     { name = "cryptography" },
@@ -359,6 +377,7 @@ websocket = [
 [package.metadata]
 requires-dist = [
     { name = "aioboto3", specifier = ">=14.3.0" },
+    { name = "chuk-artifacts", specifier = ">=0.1.0" },
     { name = "chuk-sessions", specifier = ">=0.1.0" },
     { name = "chuk-tool-processor", specifier = ">=0.1.7" },
     { name = "cryptography", specifier = ">=44.0.3" },
