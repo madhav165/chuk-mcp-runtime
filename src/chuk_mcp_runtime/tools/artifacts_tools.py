@@ -41,21 +41,19 @@ _enabled_tools: Set[str] = set()
 
 # Default tool configuration
 DEFAULT_TOOL_CONFIG = {
-    "enabled": True,
+    "enabled": False,  # Disabled by default - must be explicitly enabled in config
     "tools": {
-        "upload_file": {"enabled": True, "description": "Upload files with base64 content"},
-        "write_file": {"enabled": True, "description": "Create or update text files"},
-        "read_file": {"enabled": True, "description": "Read file contents"},
-        "list_session_files": {"enabled": True, "description": "List files in session"},
-        "delete_file": {"enabled": True, "description": "Delete files"},
-        "list_directory": {"enabled": True, "description": "List directory contents"},
-        "copy_file": {"enabled": True, "description": "Copy files within session"},
-        "move_file": {"enabled": True, "description": "Move/rename files"},
-        "get_file_metadata": {"enabled": True, "description": "Get file metadata"},
+        "upload_file": {"enabled": False, "description": "Upload files with base64 content"},
+        "write_file": {"enabled": False, "description": "Create or update text files"},
+        "read_file": {"enabled": False, "description": "Read file contents"},
+        "list_session_files": {"enabled": False, "description": "List files in session"},
+        "delete_file": {"enabled": False, "description": "Delete files"},
+        "list_directory": {"enabled": False, "description": "List directory contents"},
+        "copy_file": {"enabled": False, "description": "Copy files within session"},
+        "move_file": {"enabled": False, "description": "Move/rename files"},
+        "get_file_metadata": {"enabled": False, "description": "Get file metadata"},
         "get_presigned_url": {"enabled": False, "description": "Generate presigned URLs"},
-        "get_storage_stats": {"enabled": True, "description": "Get storage statistics"},
-        "get_current_session": {"enabled": True, "description": "Get current session information"},
-        "set_session": {"enabled": True, "description": "Set session context"},
+        "get_storage_stats": {"enabled": False, "description": "Get storage statistics"},
     }
 }
 
@@ -155,9 +153,10 @@ def _check_tool_enabled(tool_name: str):
 
 
 # ============================================================================
-# Tool Functions - Always defined, registered dynamically
+# Artifact Management Tools - All decorated with @mcp_tool
 # ============================================================================
 
+@mcp_tool(name="upload_file", description="Upload files with base64 content")
 async def upload_file(
     content: str,
     filename: str,
@@ -208,6 +207,7 @@ async def upload_file(
         raise ValueError(f"Failed to upload file: {str(e)}")
 
 
+@mcp_tool(name="write_file", description="Create or update text files")
 async def write_file(
     content: str,
     filename: str,
@@ -257,6 +257,7 @@ async def write_file(
         raise ValueError(f"Failed to write file: {str(e)}")
 
 
+@mcp_tool(name="read_file", description="Read file contents")
 async def read_file(
     artifact_id: str,
     as_text: bool = True,
@@ -300,6 +301,7 @@ async def read_file(
         raise ValueError(f"Failed to read file: {str(e)}")
 
 
+@mcp_tool(name="list_session_files", description="List files in session")
 async def list_session_files(
     session_id: Optional[str] = None,
     include_metadata: bool = False
@@ -341,6 +343,7 @@ async def list_session_files(
         raise ValueError(f"Failed to list files: {str(e)}")
 
 
+@mcp_tool(name="delete_file", description="Delete files")
 async def delete_file(
     artifact_id: str,
     session_id: Optional[str] = None
@@ -372,6 +375,7 @@ async def delete_file(
         raise ValueError(f"Failed to delete file: {str(e)}")
 
 
+@mcp_tool(name="list_directory", description="List directory contents")
 async def list_directory(
     directory_path: str,
     session_id: Optional[str] = None
@@ -409,6 +413,7 @@ async def list_directory(
         raise ValueError(f"Failed to list directory: {str(e)}")
 
 
+@mcp_tool(name="copy_file", description="Copy files within session")
 async def copy_file(
     artifact_id: str,
     new_filename: str,
@@ -455,6 +460,7 @@ async def copy_file(
         raise ValueError(f"Failed to copy file: {str(e)}")
 
 
+@mcp_tool(name="move_file", description="Move/rename files")
 async def move_file(
     artifact_id: str,
     new_filename: str,
@@ -499,6 +505,7 @@ async def move_file(
         raise ValueError(f"Failed to move file: {str(e)}")
 
 
+@mcp_tool(name="get_file_metadata", description="Get file metadata")
 async def get_file_metadata(
     artifact_id: str,
     session_id: Optional[str] = None
@@ -528,6 +535,7 @@ async def get_file_metadata(
         raise ValueError(f"Failed to get metadata: {str(e)}")
 
 
+@mcp_tool(name="get_presigned_url", description="Generate presigned URLs")
 async def get_presigned_url(
     artifact_id: str,
     expires_in: str = "medium",
@@ -565,6 +573,7 @@ async def get_presigned_url(
         raise ValueError(f"Failed to generate presigned URL: {str(e)}")
 
 
+@mcp_tool(name="get_storage_stats", description="Get storage statistics")
 async def get_storage_stats(
     session_id: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -602,51 +611,6 @@ async def get_storage_stats(
 # Registration and Utility Functions
 # ============================================================================
 
-async def get_current_session() -> Dict[str, Any]:
-    """
-    Get information about the current session.
-    
-    Returns:
-        Dictionary containing current session information
-    """
-    from chuk_mcp_runtime.session.session_management import get_session_context
-    
-    current_session = get_session_context()
-    
-    if current_session:
-        return {
-            "session_id": current_session,
-            "status": "active",
-            "message": f"Current session: {current_session}"
-        }
-    else:
-        return {
-            "session_id": None,
-            "status": "no_session",
-            "message": "No session context available. A session will be auto-created when needed."
-        }
-
-
-async def set_session_context_tool(session_id: str) -> str:
-    """
-    Set the session context for subsequent operations.
-    
-    Args:
-        session_id: Session ID to use for subsequent operations
-        
-    Returns:
-        Success message confirming the session was set
-    """
-    from chuk_mcp_runtime.session.session_management import set_session_context, normalize_session_id
-    
-    try:
-        normalized_id = normalize_session_id(session_id)
-        set_session_context(normalized_id)
-        return f"Session context set to: {normalized_id}"
-    except Exception as e:
-        raise ValueError(f"Failed to set session context: {str(e)}")
-
-
 # Map of tool name to function
 TOOL_FUNCTIONS = {
     "upload_file": upload_file,
@@ -660,8 +624,6 @@ TOOL_FUNCTIONS = {
     "get_file_metadata": get_file_metadata,
     "get_presigned_url": get_presigned_url,
     "get_storage_stats": get_storage_stats,
-    "get_current_session": get_current_session,
-    "set_session": set_session_context_tool,
 }
 
 async def register_artifacts_tools(config: Dict[str, Any] = None) -> bool:
@@ -686,23 +648,19 @@ async def register_artifacts_tools(config: Dict[str, Any] = None) -> bool:
         logger.error(f"Failed to initialize artifact store: {e}")
         return False
     
-    # Now register the enabled tools dynamically
+    # Register the enabled tools - they're already decorated with @mcp_tool
     registered_count = 0
     for tool_name in _enabled_tools:
         if tool_name in TOOL_FUNCTIONS:
             func = TOOL_FUNCTIONS[tool_name]
             
-            # Get description from config
-            tool_config = DEFAULT_TOOL_CONFIG["tools"].get(tool_name, {})
-            description = tool_config.get("description", f"Artifact tool: {tool_name}")
-            
-            # Create the mcp_tool decorator and apply it
-            decorated_func = mcp_tool(name=tool_name, description=description)(func)
-            
-            # Register in the global registry
-            TOOLS_REGISTRY[tool_name] = decorated_func
-            registered_count += 1
-            logger.debug(f"Registered tool: {tool_name}")
+            # Function should already be decorated with @mcp_tool
+            if hasattr(func, '_mcp_tool'):
+                TOOLS_REGISTRY[tool_name] = func
+                registered_count += 1
+                logger.debug(f"Registered tool: {tool_name}")
+            else:
+                logger.warning(f"Tool {tool_name} missing _mcp_tool metadata")
     
     logger.info(f"Registered {registered_count} artifact management tools")
     logger.info(f"Enabled tools: {', '.join(sorted(_enabled_tools))}")
