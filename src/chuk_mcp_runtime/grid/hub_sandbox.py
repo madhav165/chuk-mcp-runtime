@@ -1,53 +1,52 @@
-# chuk_mcp_runtime/grid/hub_sandbox.py
 """
-Hub ↔︎ Sandbox integration - transport-agnostic **with shared session store registry**
-==============================================================================
+Hub ↔︎ Sandbox integration (per-request streams)
+==============================================
 
-All hubs and sandboxes already depend on *one* session store picked via
-``SESSION_PROVIDER`` (memory or Redis by default).  This revision drops
-the dedicated Redis client and re-uses that **same provider** to publish
-which hub “owns” every sandbox.
-
-Registry rules
---------------
-* One key per sandbox: ``sbx:<sandbox_id>`` → JSON blob
-  ``{"hub": HUB_ID, "transport": "sse", "endpoint": "…", "ts": …}``
-* Stored with a long TTL (24h) so the memory provider keeps it alive;
-  the owning hub *deletes* the key when the stream closes.
-* Every hub resolves remote sandboxes through the provider before
-  deciding whether to **proxy** the call to another hub.
-```
+Each sandbox advertises itself once; every tool invocation then dials the
+sandbox’s endpoint *just for that request* and closes immediately.  This
+avoids multiplexing complexity and removes back-pressure headaches.
+Registry lives in the existing SESSION_PROVIDER (memory, Redis, …).
 """
 from __future__ import annotations
 
-import asyncio, json, os, time, urllib.parse
-from typing import Dict, Tuple, Optional, Callable, AsyncContextManager
+import asyncio
+import json
+import os
+import time
+import urllib.parse
+import uuid
+from typing import AsyncContextManager, Callable, Dict, Optional
+
+import aiohttp
 
 from chuk_mcp_runtime.common.mcp_tool_decorator import mcp_tool, TOOLS_REGISTRY
 from chuk_mcp_runtime.proxy.tool_wrapper import create_proxy_tool
 from chuk_mcp_runtime.server.logging_config import get_logger
 from chuk_mcp_runtime.session import provider_factory  # ← reuse existing providers
 
-logger = get_logger("hub.register")
+logger = get_logger("hub")
 
-# ---------------------------------------------------------------------------
-# Session‑store helpers (works with memory *and* Redis providers)
-# ---------------------------------------------------------------------------
-
+# ─────────────────────────────────────────────────────────────────────────────
+#  Registry helpers (shared with session provider)
+# ─────────────────────────────────────────────────────────────────────────────
 _SBXPREFIX = "sbx:"
-_TTL = 24 * 3600  # 24 h – long enough for reconnects, short for stale GC
+_TTL = 24 * 3600  # 24 h
 
 _session_factory: Callable[[], AsyncContextManager] | None = None
+
+
 async def _get_session_factory():
     global _session_factory  # noqa: PLW0603
     if _session_factory is None:
         _session_factory = provider_factory.factory_for_env()
     return _session_factory
 
+
 async def _registry_put(sbx_id: str, record: dict):
     factory = await _get_session_factory()
     async with factory() as sess:
         await sess.setex(f"{_SBXPREFIX}{sbx_id}", _TTL, json.dumps(record))
+
 
 async def _registry_get(sbx_id: str) -> Optional[dict]:
     factory = await _get_session_factory()
@@ -55,29 +54,25 @@ async def _registry_get(sbx_id: str) -> Optional[dict]:
         raw = await sess.get(f"{_SBXPREFIX}{sbx_id}")
     return None if raw is None else json.loads(raw)
 
+
 async def _registry_del(sbx_id: str):
     factory = await _get_session_factory()
     async with factory() as sess:
         if hasattr(sess, "delete"):
             await sess.delete(f"{_SBXPREFIX}{sbx_id}")
-        else:  # memory provider pre‑TTL cleanup
+        else:  # memory provider: overwrite with short TTL
             await sess.setex(f"{_SBXPREFIX}{sbx_id}", 1, "{}")
 
-# ---------------------------------------------------------------------------
-# Misc constants
-# ---------------------------------------------------------------------------
 
-_HUB_ID = os.getenv("HUB_ID", os.getenv("POD_NAME", "hub"))
-
-# ---------------------------------------------------------------------------
-# Transport dialer (SSE / stdio‑TCP / WebSocket)
-# ---------------------------------------------------------------------------
-
+# ─────────────────────────────────────────────────────────────────────────────
+#  Transport dials
+# ─────────────────────────────────────────────────────────────────────────────
 async def _dial(endpoint: str, transport: str):
+    """Return `(reader, writer)` pair for the chosen transport."""
     transport = transport.lower()
     if transport == "sse":
         from mcp.lowlevel.client import connect_sse
-        return await connect_sse(endpoint)
+        return await connect_sse(endpoint)  # returns StreamReader / StreamWriter
 
     if transport == "stdio":
         if endpoint.startswith("tcp://"):
@@ -85,8 +80,8 @@ async def _dial(endpoint: str, transport: str):
             host, port = ep.hostname, ep.port
         else:
             host, port = endpoint.split(":", 1)
-            port = int(port)
-        return await asyncio.open_connection(host, int(port))
+        reader, writer = await asyncio.open_connection(host, int(port))
+        return reader, writer
 
     if transport == "ws":
         import websockets  # type: ignore
@@ -101,105 +96,106 @@ async def _dial(endpoint: str, transport: str):
 
     raise ValueError(f"Unsupported transport '{transport}'")
 
-# Active streams keyed by sandbox_id
-_SANDBOX_STREAMS: Dict[str, Tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
 
-# ---------------------------------------------------------------------------
-# Hub‑side tool: receive registration, create wrappers, write registry entry
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+#  Hub-side tool: register sandbox & create proxy wrappers
+# ─────────────────────────────────────────────────────────────────────────────
+_HUB_ID = os.getenv("HUB_ID", os.getenv("POD_NAME", "hub"))
 
-@mcp_tool(name="hub.register_sandbox", description="Register a sandbox with this hub and expose its tools.")
-async def register_sandbox(*, sandbox_id: str, endpoint: str, transport: str = "sse") -> str:  # noqa: D401
+
+@mcp_tool(name="hub.register_sandbox", description="Register a sandbox; expose its tools via proxy wrappers.")
+async def register_sandbox(
+    *, sandbox_id: str, endpoint: str, transport: str = "sse"
+) -> str:  # noqa: D401
+    """Hub entry-point called by sandboxes on boot."""
+    # 1) Dial *once* just to fetch the tool catalogue
     reader, writer = await _dial(endpoint, transport)
-    _SANDBOX_STREAMS[sandbox_id] = (reader, writer)
-    logger.info("Sandbox %s connected via %s", sandbox_id, transport)
-
-    # ---- list tools -----------------------------------------------------
     writer.write(b'{"role":"list_tools"}\n')
     await writer.drain()
-    tools = json.loads(await reader.readline())["result"]
+    tools_meta = json.loads(await reader.readline())["result"]
+    writer.close()
+    await writer.wait_closed()
 
+    # 2) Build proxy wrappers (per-request dial)
     ns_root = f"sbx.{sandbox_id}"
-    for meta in tools:
+    for meta in tools_meta:
         tname = meta["name"]
-        fq = f"{ns_root}.{tname}"
-        wrapper = await create_proxy_tool(ns_root, tname, None, meta)
+
+        async def _remote_call(arguments, *, _t=tname, _ep=endpoint, _tr=transport):
+            reader, writer = await _dial(_ep, _tr)
+            req_id = uuid.uuid4().hex
+            payload = {"id": req_id, "name": _t, "arguments": arguments}
+            writer.write(json.dumps(payload).encode() + b"\n")
+            await writer.drain()
+
+            while True:
+                line = await reader.readline()
+                if not line:
+                    raise RuntimeError("Remote closed before response")
+                msg = json.loads(line)
+                if msg.get("id") == req_id:
+                    writer.close()
+                    await writer.wait_closed()
+                    if "error" in msg:
+                        raise RuntimeError(msg["error"])
+                    return msg["result"]
+
+        wrapper = await create_proxy_tool(ns_root, tname, _remote_call, meta)
         wrapper._owning_hub = _HUB_ID  # type: ignore[attr-defined]
-        TOOLS_REGISTRY[fq] = wrapper
+        TOOLS_REGISTRY[f"{ns_root}.{tname}"] = wrapper
 
-    # ---- write to shared registry --------------------------------------
-    await _registry_put(sandbox_id, {
-        "hub": _HUB_ID,
-        "transport": transport,
-        "endpoint": endpoint,
-        "ts": int(time.time()),
-    })
+    # 3) Write/refresh registry entry
+    record = {"hub": _HUB_ID, "transport": transport, "endpoint": endpoint, "ts": int(time.time())}
+    await _registry_put(sandbox_id, record)
 
-    # ---- background pump ------------------------------------------------
-    async def _pump():
-        try:
-            while await reader.readline():
-                pass
-        finally:
-            _SANDBOX_STREAMS.pop(sandbox_id, None)
-            for key in list(TOOLS_REGISTRY):
-                if key.startswith(f"sbx.{sandbox_id}."):
-                    TOOLS_REGISTRY.pop(key, None)
-            await _registry_del(sandbox_id)
-            logger.warning("Sandbox %s disconnected", sandbox_id)
+    logger.info("Registered %s tool(s) from sandbox %s", len(tools_meta), sandbox_id)
+    return f"registered {len(tools_meta)} tool(s) from {sandbox_id}"
 
-    asyncio.create_task(_pump())
-    return f"registered {len(tools)} tool(s) from {sandbox_id} via {transport} on hub {_HUB_ID}"
 
-# ---------------------------------------------------------------------------
-# Helper: cross‑hub proxy (call from MCPServer.call_tool)
-# ---------------------------------------------------------------------------
-
+# ─────────────────────────────────────────────────────────────────────────────
+#  Cross-hub proxy helper
+# ─────────────────────────────────────────────────────────────────────────────
 async def proxy_call_tool(name: str, arguments: dict, *, self_execute):
-    """Execute locally or forward to owning hub based on registry."""
+    """Run locally or HTTP-forward to the hub that owns the sandbox."""
+    # Fast path: tool exists locally & owned by this hub
+    tool = TOOLS_REGISTRY.get(name)
+    if tool and getattr(tool, "_owning_hub", _HUB_ID) == _HUB_ID:
+        return await self_execute(name, arguments)
 
-    # Local fast path ----------------------------------------------------
-    if name in TOOLS_REGISTRY:
-        owner = getattr(TOOLS_REGISTRY[name], "_owning_hub", _HUB_ID)
-        if owner == _HUB_ID:
-            return await self_execute(name, arguments)
-
-    # Only sandbox tools can be proxied
     if not name.startswith("sbx."):
-        raise ValueError(f"Tool {name} not found locally and no sbx prefix")
+        raise ValueError(f"Tool {name} not found and not sandbox-qualified")
 
     sbx_id = name.split(".")[1]
     rec = await _registry_get(sbx_id)
     if rec is None:
         raise ValueError(f"No registry entry for sandbox {sbx_id}")
-    owner_hub = rec["hub"]
 
-    if owner_hub == _HUB_ID:
-        # we own it but wrapper missing (race during reconnect)
+    owner_hub = rec["hub"]
+    if owner_hub == _HUB_ID:  # we own it but wrapper missing (race)
         return await self_execute(name, arguments)
 
-    # HTTP proxy to owning hub ------------------------------------------
     base_tpl = os.getenv("HUB_BASE_URL_TEMPLATE", "http://{hub}:8000")
     url = f"{base_tpl.format(hub=owner_hub)}/call/{name}"
+    headers = {}
+    if token := os.getenv("HUB_TOKEN"):
+        headers["Authorization"] = f"Bearer {token}"
 
-    import aiohttp
-    async with aiohttp.ClientSession() as sess:
+    async with aiohttp.ClientSession(headers=headers) as sess:
         async with sess.post(url, json=arguments) as resp:
+            data = await resp.json()
             if resp.status != 200:
-                raise RuntimeError(f"Upstream hub {owner_hub} error {resp.status}: {await resp.text()}")
-            return await resp.json()
+                raise RuntimeError(f"Hub {owner_hub} error {resp.status}: {data}")
+            return data
 
-# ---------------------------------------------------------------------------
-# Sandbox‑side bootstrap
-# ---------------------------------------------------------------------------
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Sandbox-side bootstrap helper
+# ─────────────────────────────────────────────────────────────────────────────
 async def register_with_hub() -> None:
-    """Schedule this coroutine once the sandbox runtime is listening."""
-    import aiohttp
-
+    """Run once on sandbox start; then refresh TTL in background."""
     sbx_id = os.getenv("SANDBOX_ID")
     if not sbx_id:
-        logger.error("SANDBOX_ID unset – skipping registration")
+        logger.error("SANDBOX_ID unset – skipping hub registration")
         return
 
     hub_addr = os.getenv("HUB_ADDR", "http://hub:8000")
@@ -213,7 +209,7 @@ async def register_with_hub() -> None:
     payload = {"sandbox_id": sbx_id, "endpoint": endpoint, "transport": transport}
     headers = {"Authorization": f"Bearer {hub_token}"} if hub_token else {}
 
-    try:
+    async def _send_register():
         async with aiohttp.ClientSession(headers=headers) as sess:
             async with sess.post(f"{hub_addr}/call/hub.register_sandbox", json=payload) as resp:
                 txt = await resp.text()
@@ -221,8 +217,20 @@ async def register_with_hub() -> None:
                     logger.info("[sandbox %s] hub: %s", sbx_id, txt)
                 else:
                     logger.error("Hub error %s: %s", resp.status, txt)
-    except Exception as exc:
-        logger.exception("Failed to register with hub: %s", exc)
+
+    # 1) initial registration
+    await _send_register()
+
+    # 2) heartbeat: refresh registry entry every TTL/3
+    async def _heartbeat():
+        while True:
+            await asyncio.sleep(_TTL // 3)
+            try:
+                await _send_register()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Heartbeat failed: %s", exc)
+
+    asyncio.create_task(_heartbeat())
 
 
 def _infer_endpoint(transport: str) -> Optional[str]:
