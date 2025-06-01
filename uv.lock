@@ -352,6 +352,7 @@ version = "0.1.36"
 source = { editable = "." }
 dependencies = [
     { name = "chuk-artifacts" },
+    { name = "chuk-sessions" },
     { name = "chuk-tool-processor" },
     { name = "cryptography" },
     { name = "mcp" },
@@ -375,6 +376,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "chuk-artifacts", specifier = ">=0.1.5" },
+    { name = "chuk-sessions", specifier = ">=0.1.1" },
     { name = "chuk-tool-processor", specifier = ">=0.1.7" },
     { name = "cryptography", specifier = ">=44.0.3" },
     { name = "mcp", specifier = ">=1.6.0" },

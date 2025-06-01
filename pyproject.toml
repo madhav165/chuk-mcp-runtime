@@ -19,6 +19,7 @@ dependencies = [
   "pyjwt>=2.10.1",
   "cryptography>=44.0.3",
   "chuk-artifacts>=0.1.5",
+  "chuk-sessions>=0.1.1",
 ]
 
 [project.optional-dependencies]

@@ -3,9 +3,10 @@ import os
 import sys
 import asyncio
 import pytest
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock, AsyncMock, patch
 
 import chuk_mcp_runtime.entry as entry
+from chuk_mcp_runtime.common.mcp_tool_decorator import TOOLS_REGISTRY
 from tests.conftest import MockProxyServerManager, run_async
 
 class DummyServerRegistry:
@@ -20,12 +21,12 @@ class DummyServerRegistry:
         return {}
 
 class DummyMCPServer:
-    def __init__(self, config):
+    def __init__(self, config, tools_registry=None):
         self.config = config
         self.serve_called = False
         self.server_name = "test-server"
         self.registered_tools = []
-        self.tools_registry = {}
+        self.tools_registry = tools_registry or {}
         
     async def serve(self, custom_handlers=None):
         """Mock serve method that doesn't try to use stdio_server."""
@@ -38,11 +39,32 @@ class DummyMCPServer:
         self.registered_tools.append(name)
         self.tools_registry[name] = func
 
+class MockArtifactTools:
+    """Mock artifact tools module for testing."""
+    
+    @staticmethod
+    def get_artifact_tools():
+        return ["upload_file", "write_file", "read_file", "list_session_files"]
+    
+    @staticmethod
+    async def upload_file(**kwargs):
+        return "Mock upload result"
+    
+    @staticmethod
+    async def write_file(**kwargs):
+        return "Mock write result"
+
 @pytest.fixture(autouse=True)
 def patch_entry(monkeypatch):
     """Set up common patches for entry module tests."""
+    # Clear TOOLS_REGISTRY before each test
+    TOOLS_REGISTRY.clear()
+    
     # Mock configuration and logging
-    monkeypatch.setattr(entry, "load_config", lambda paths, default: {"proxy": {"enabled": True}})
+    monkeypatch.setattr(entry, "load_config", lambda paths, default: {
+        "proxy": {"enabled": True},
+        "artifacts": {"enabled": True, "tools": {"enabled": True}}
+    })
     monkeypatch.setattr(entry, "configure_logging", lambda cfg: None)
     monkeypatch.setattr(entry, "find_project_root", lambda *a, **kw: "/tmp")
     
@@ -53,15 +75,51 @@ def patch_entry(monkeypatch):
     # Mock the proxy manager
     monkeypatch.setattr(entry, "ProxyServerManager", MockProxyServerManager)
     
-    # Mock initialize_tool_registry
+    # Mock initialize_tool_registry and other tool functions
     mock_init_registry = AsyncMock()
     monkeypatch.setattr(entry, "initialize_tool_registry", mock_init_registry)
+    
+    # Mock the artifact tools registration
+    mock_register_artifacts = AsyncMock(return_value=True)
+    monkeypatch.setattr(entry, "register_artifact_tools", mock_register_artifacts)
+    
+    # Mock get_artifact_tools function
+    def mock_get_artifact_tools():
+        return {
+            "upload_file": MockArtifactTools.upload_file,
+            "write_file": MockArtifactTools.write_file,
+            "read_file": AsyncMock(return_value="mock file content"),
+            "list_session_files": AsyncMock(return_value=[])
+        }
+    
+    monkeypatch.setattr(entry, "get_artifact_tools", mock_get_artifact_tools)
+    
+    # Mock the _iter_tools function
+    def mock_iter_tools(container):
+        if isinstance(container, dict):
+            for name, func in container.items():
+                # Create a mock function with _mcp_tool attribute
+                mock_func = AsyncMock()
+                mock_func._mcp_tool = MagicMock()
+                mock_func._mcp_tool.name = name
+                yield name, mock_func
+        elif isinstance(container, (list, tuple, set)):
+            for name in container:
+                mock_func = AsyncMock()
+                mock_func._mcp_tool = MagicMock()
+                mock_func._mcp_tool.name = name
+                yield name, mock_func
+    
+    monkeypatch.setattr(entry, "_iter_tools", mock_iter_tools)
+    
+    # Mock openai compatibility
+    mock_init_openai = AsyncMock()
+    monkeypatch.setattr(entry, "initialize_openai_compatibility", mock_init_openai)
     
     # Mock asyncio.run to use our run_async helper
     monkeypatch.setattr(asyncio, "run", run_async)
     
     # Mock stdio_server
-    # Create a dummy async context manager for stdio_server
     async def dummy_stdio_server():
         class DummyStream:
             async def read(self, n=-1):
@@ -93,6 +151,9 @@ def patch_entry(monkeypatch):
     os.environ.pop("NO_BOOTSTRAP", None)
     if "mcp.server.stdio" in sys.modules:
         del sys.modules["mcp.server.stdio"]
+    
+    # Clear registry after test
+    TOOLS_REGISTRY.clear()
 
 def test_run_runtime_default_bootstrap(monkeypatch):
     """Test runtime with default bootstrap enabled."""
@@ -154,17 +215,20 @@ def test_proxy_integration(monkeypatch):
     # Create a spy server to track tool registration
     server_instance = None
     class SpyServer(DummyMCPServer):
-        def __init__(self, config):
-            super().__init__(config)
+        def __init__(self, config, tools_registry=None):
+            super().__init__(config, tools_registry)
             nonlocal server_instance
             server_instance = self
             
     monkeypatch.setattr(entry, "MCPServer", SpyServer)
     
-    # Create a test proxy manager
+    # Create a test proxy manager with get_all_tools method
     class TestProxyManager(MockProxyServerManager):
         async def get_all_tools(self):
             return {"proxy.test_server.tool": AsyncMock(return_value="test result")}
+            
+        async def start_servers(self):
+            self.running = {"test_server": {"status": "running"}}
             
     monkeypatch.setattr(entry, "ProxyServerManager", TestProxyManager)
     
@@ -175,6 +239,109 @@ def test_proxy_integration(monkeypatch):
     assert server_instance is not None
     assert server_instance.registered_tools, "No tools were registered"
     assert "proxy.test_server.tool" in server_instance.registered_tools
+
+def test_artifacts_integration(monkeypatch):
+    """Test artifact tools registration with the MCP server."""
+    # Create a spy server to track tool registration
+    server_instance = None
+    class SpyServer(DummyMCPServer):
+        def __init__(self, config, tools_registry=None):
+            super().__init__(config, tools_registry)
+            nonlocal server_instance
+            server_instance = self
+            
+    monkeypatch.setattr(entry, "MCPServer", SpyServer)
+    
+    # Set CHUK_ARTIFACTS_AVAILABLE to True
+    monkeypatch.setattr(entry, "CHUK_ARTIFACTS_AVAILABLE", True)
+    
+    # Run the runtime
+    entry.run_runtime()
+    
+    # Verify that artifact tools were registered
+    assert server_instance is not None
+    assert server_instance.registered_tools, "No tools were registered"
+    
+    # Check for some expected artifact tools
+    expected_tools = ["upload_file", "write_file", "read_file", "list_session_files"]
+    registered_tool_names = server_instance.registered_tools
+    
+    # At least some artifact tools should be registered
+    assert any(tool in registered_tool_names for tool in expected_tools), \
+           f"Expected some of {expected_tools} in {registered_tool_names}"
+
+def test_tools_registry_population(monkeypatch):
+    """Test that TOOLS_REGISTRY is properly populated and passed to MCPServer."""
+    # Mock some tools in the registry
+    mock_tool_func = AsyncMock()
+    mock_tool_func._mcp_tool = MagicMock()
+    mock_tool_func._mcp_tool.name = "test_tool"
+    
+    TOOLS_REGISTRY["test_tool"] = mock_tool_func
+    
+    # Create a spy server to track the tools_registry parameter
+    server_instance = None
+    class SpyServer(DummyMCPServer):
+        def __init__(self, config, tools_registry=None):
+            super().__init__(config, tools_registry)
+            nonlocal server_instance
+            server_instance = self
+            
+    monkeypatch.setattr(entry, "MCPServer", SpyServer)
+    
+    # Run the runtime
+    entry.run_runtime()
+    
+    # Verify that the server was initialized with the tools registry
+    assert server_instance is not None
+    assert server_instance.tools_registry is not None
+    assert "test_tool" in server_instance.tools_registry
+
+def test_openai_compatibility_initialization(monkeypatch):
+    """Test that OpenAI compatibility is properly initialized."""
+    init_openai_called = False
+    
+    async def mock_init_openai():
+        nonlocal init_openai_called
+        init_openai_called = True
+        
+    monkeypatch.setattr(entry, "initialize_openai_compatibility", mock_init_openai)
+    
+    # Run the runtime
+    entry.run_runtime()
+    
+    # Verify that OpenAI compatibility was initialized
+    assert init_openai_called
+
+def test_custom_handlers_proxy_text(monkeypatch):
+    """Test that proxy text handler is properly set up when proxy is available."""
+    # Create a test proxy manager with process_text method
+    class TestProxyManager(MockProxyServerManager):
+        async def process_text(self, text):
+            return [{"content": f"Processed: {text}"}]
+            
+        async def start_servers(self):
+            self.running = {"test_server": {"status": "running"}}
+            
+    monkeypatch.setattr(entry, "ProxyServerManager", TestProxyManager)
+    
+    # Create a spy server to track custom handlers
+    server_instance = None
+    class SpyServer(DummyMCPServer):
+        def __init__(self, config, tools_registry=None):
+            super().__init__(config, tools_registry)
+            nonlocal server_instance
+            server_instance = self
+            
+    monkeypatch.setattr(entry, "MCPServer", SpyServer)
+    
+    # Run the runtime
+    entry.run_runtime()
+    
+    # Verify that custom handlers were set
+    assert server_instance is not None
+    assert server_instance.custom_handlers is not None
+    assert "handle_proxy_text" in server_instance.custom_handlers
 
 def test_main_success(monkeypatch, capsys):
     """Test successful execution of main function."""
@@ -191,7 +358,8 @@ def test_main_success(monkeypatch, capsys):
     entry.main(default_config={})
     
     # Should not have any errors
-    assert capsys.readouterr().err == ""
+    captured = capsys.readouterr()
+    assert captured.err == ""
 
 def test_main_failure(monkeypatch, capsys):
     """Test handling of errors in main function."""
@@ -211,4 +379,114 @@ def test_main_failure(monkeypatch, capsys):
     assert ei.value.code == 1
     
     # Should print the error message
-    assert "Error starting CHUK MCP server: bang" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert "Error starting CHUK MCP server: bang" in captured.err
+
+def test_config_path_handling(monkeypatch):
+    """Test various config path handling scenarios."""
+    config_calls = []
+    
+    def mock_load_config(paths, default):
+        config_calls.append(paths)
+        return {"proxy": {"enabled": False}}
+        
+    monkeypatch.setattr(entry, "load_config", mock_load_config)
+    
+    # Test with no config path
+    monkeypatch.setattr(sys, "argv", ["prog"])
+    entry.main()
+    
+    # Should have called with None for paths
+    assert len(config_calls) == 1
+    assert config_calls[0] is None
+    
+    # Test with -c flag
+    config_calls.clear()
+    monkeypatch.setattr(sys, "argv", ["prog", "-c", "test.yaml"])
+    entry.main()
+    
+    assert len(config_calls) == 1
+    assert config_calls[0] == ["test.yaml"]
+
+def test_chuk_artifacts_unavailable(monkeypatch):
+    """Test behavior when chuk_artifacts is not available."""
+    # Set CHUK_ARTIFACTS_AVAILABLE to False
+    monkeypatch.setattr(entry, "CHUK_ARTIFACTS_AVAILABLE", False)
+    
+    # Mock the register_artifact_tools to simulate unavailable artifacts
+    async def mock_register_artifacts_unavailable(cfg):
+        return False  # Indicates artifacts are not available
+        
+    monkeypatch.setattr(entry, "register_artifact_tools", mock_register_artifacts_unavailable)
+    
+    # Create a spy server to track what gets registered
+    server_instance = None
+    class SpyServer(DummyMCPServer):
+        def __init__(self, config, tools_registry=None):
+            super().__init__(config, tools_registry)
+            nonlocal server_instance
+            server_instance = self
+            
+    monkeypatch.setattr(entry, "MCPServer", SpyServer)
+    
+    # Run the runtime
+    entry.run_runtime()
+    
+    # Should still work, just without artifact tools
+    assert server_instance is not None
+
+def test_keyboard_interrupt_handling(monkeypatch):
+    """Test that KeyboardInterrupt is handled gracefully."""
+    async def mock_run_runtime_interrupt(*args, **kwargs):
+        raise KeyboardInterrupt()
+        
+    monkeypatch.setattr(entry, "run_runtime_async", mock_run_runtime_interrupt)
+    
+    # Should not raise an exception, just exit gracefully
+    entry.run_runtime()
+    
+def test_proxy_disabled(monkeypatch):
+    """Test behavior when proxy is disabled."""
+    # Mock config with proxy disabled
+    monkeypatch.setattr(entry, "load_config", lambda paths, default: {
+        "proxy": {"enabled": False}
+    })
+    
+    # Create a spy server
+    server_instance = None
+    class SpyServer(DummyMCPServer):
+        def __init__(self, config, tools_registry=None):
+            super().__init__(config, tools_registry)
+            nonlocal server_instance
+            server_instance = self
+            
+    monkeypatch.setattr(entry, "MCPServer", SpyServer)
+    
+    # Run the runtime
+    entry.run_runtime()
+    
+    # Should still work
+    assert server_instance is not None
+    assert server_instance.serve_called
+
+def test_proxy_has_support_false(monkeypatch):
+    """Test behavior when HAS_PROXY_SUPPORT is False."""
+    # Disable proxy support
+    monkeypatch.setattr(entry, "HAS_PROXY_SUPPORT", False)
+    
+    # Create a spy server
+    server_instance = None
+    class SpyServer(DummyMCPServer):
+        def __init__(self, config, tools_registry=None):
+            super().__init__(config, tools_registry)
+            nonlocal server_instance
+            server_instance = self
+            
+    monkeypatch.setattr(entry, "MCPServer", SpyServer)
+    
+    # Run the runtime
+    entry.run_runtime()
+    
+    # Should still work, just without proxy
+    assert server_instance is not None
+    assert server_instance.serve_called
