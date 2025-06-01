@@ -21,14 +21,74 @@ proxy:
   namespace: "proxy"
   openai_compatible: false   # ← set to true if you want underscores
 
-mcp_servers:
-  time:
-    type: "stdio"
-    command: "uvx"
-    args: ["mcp-server-time", "--local-timezone", "America/New_York"]
-  echo:
-    enabled: true
-    location: "../mcp-echo-server/src"
+# mcp_servers:
+#   time:
+#     type: "stdio"
+#     command: "uvx"
+#     args: ["mcp-server-time", "--local-timezone", "America/New_York"]
+#   echo:
+#     enabled: true
+#     location: "../mcp-echo-server/src"
+#     tools:
+#       enabled: true
+#       module: "mcp_echo_server.echo_tools.tools"
+
+artifacts:
+  # Storage configuration
+  storage_provider: "s3"  # "filesystem", "memory", "s3", "ibm_cos"
+  session_provider: "redis"      # "memory", "redis"
+  
+  # Tool configuration - fine-grained control over which tools are available
+  tools:
+    enabled: true  # Master switch for all artifact tools
+    
+    # Individual tool configuration
     tools:
-      enabled: true
-      module: "mcp_echo_server.echo_tools.tools"
+      # Core file operations (typically always enabled)
+      write_file:
+        enabled: true
+        description: "Create or update text files"
+      
+      read_file:
+        enabled: true
+        description: "Read file contents"
+      
+      list_session_files:
+        enabled: true
+        description: "List files in current session"
+      
+      # File management operations
+      upload_file:
+        enabled: true
+        description: "Upload files with base64 content"
+      
+      delete_file:
+        enabled: true  # Set to false to prevent file deletion
+        description: "Delete files from storage"
+      
+      copy_file:
+        enabled: true
+        description: "Copy files within same session"
+      
+      move_file:
+        enabled: true  # Set to false to prevent file moves
+        description: "Move or rename files"
+      
+      # Directory operations
+      list_directory:
+        enabled: true
+        description: "List contents of directories"
+      
+      # Metadata and advanced features
+      get_file_metadata:
+        enabled: true
+        description: "Get detailed file information"
+      
+      get_storage_stats:
+        enabled: true  # Set to false to hide storage statistics
+        description: "Get storage usage statistics"
+      
+      # URL generation (often disabled for security)
+      get_presigned_url:
+        enabled: false  # Disabled by default for security
+        description: "Generate temporary download URLs"

@@ -10,7 +10,7 @@ Spin up the full CHUK MCP Runtime ***with the proxy layer enabled*** by calling
 Highlights
 ~~~~~~~~~~
 * Injects extra proxy settings via **default_config**.
-* Lets `run_runtime()` handle graceful shutdown – no custom signal handling.
+* Lets `run_runtime()` handle graceful shutdown - no custom signal handling.
 * Works with the new single-flag design
   (`proxy.openai_compatible = true | false`).
 """

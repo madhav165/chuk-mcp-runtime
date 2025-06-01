@@ -6,7 +6,7 @@ Starts the local MCP server *and* the optional proxy layer declared in the
 configuration. Everything runs inside a single `asyncio` event-loop so that
 shutdown (Ctrl-C / EOF) is graceful and predictable.
 
-Fully async-native implementation.
+Fully async-native implementation with enhanced chuk_artifacts integration.
 """
 from __future__ import annotations
 
@@ -25,6 +25,18 @@ from chuk_mcp_runtime.common.mcp_tool_decorator import initialize_tool_registry
 from chuk_mcp_runtime.common.openai_compatibility import (
     initialize_openai_compatibility,
 )
+
+# Import artifacts tools from our tools package
+try:
+    from chuk_mcp_runtime.tools import register_artifacts_tools, ARTIFACTS_TOOLS_AVAILABLE
+    # Alias for consistency
+    register_artifact_tools = register_artifacts_tools
+    CHUK_ARTIFACTS_AVAILABLE = ARTIFACTS_TOOLS_AVAILABLE
+except ImportError:
+    CHUK_ARTIFACTS_AVAILABLE = False
+    async def register_artifact_tools():
+        """Placeholder when artifacts tools are not available."""
+        pass
 
 logger = get_logger("chuk_mcp_runtime.entry")
 
@@ -60,6 +72,16 @@ async def run_runtime_async(
     # 3) ── initialise local tools and create OpenAI-style aliases ──────
     await initialize_tool_registry()
 
+    # 4) ── register chuk_artifacts tools if available ──────────────────
+    if CHUK_ARTIFACTS_AVAILABLE:
+        try:
+            await register_artifact_tools()
+            logger.info("chuk_artifacts tools registered successfully")
+        except Exception as exc:
+            logger.warning("Failed to register chuk_artifacts tools: %s", exc)
+    else:
+        logger.info("chuk_artifacts not available - file management tools not loaded")
+
     # The wrapper generator may be monkey-patched to a non-awaitable
     try:
         if callable(initialize_openai_compatibility):
@@ -70,7 +92,7 @@ async def run_runtime_async(
     except Exception as exc:  # pragma: no cover
         logger.warning("OpenAI-compat wrapper init failed: %s", exc)
 
-    # 4) ── start proxy layer if requested ───────────────────────────────
+    # 5) ── start proxy layer if requested ───────────────────────────────
     proxy_mgr = None
     if _need_proxy(config):
         try:
@@ -83,7 +105,7 @@ async def run_runtime_async(
             logger.error("Error starting proxy layer: %s", e, exc_info=True)
             proxy_mgr = None
 
-    # 5) ── optional proxy text handler ──────────────────────────────────
+    # 6) ── optional proxy text handler ──────────────────────────────────
     custom_handlers = None
     if proxy_mgr and hasattr(proxy_mgr, "process_text"):
 
@@ -96,7 +118,7 @@ async def run_runtime_async(
 
         custom_handlers = {"handle_proxy_text": handle_proxy_text}
 
-    # 6) ── launch local MCP server ──────────────────────────────────────
+    # 7) ── launch local MCP server ──────────────────────────────────────
     mcp_server = MCPServer(config)
     logger.info("Local MCP server '%s' starting", getattr(mcp_server, "server_name", ""))
 
@@ -114,8 +136,6 @@ async def run_runtime_async(
             logger.info("Stopping proxy layer")
             await proxy_mgr.stop_servers()
 
-
-# run_runtime(), main_async(), main() remain unchanged …
 
 def run_runtime(
     config_paths: Optional[List[str]] = None,

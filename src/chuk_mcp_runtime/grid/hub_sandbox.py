@@ -195,7 +195,7 @@ async def register_with_hub() -> None:
     """Run once on sandbox start; then refresh TTL in background."""
     sbx_id = os.getenv("SANDBOX_ID")
     if not sbx_id:
-        logger.error("SANDBOX_ID unset – skipping hub registration")
+        logger.error("SANDBOX_ID unset - skipping hub registration")
         return
 
     hub_addr = os.getenv("HUB_ADDR", "http://hub:8000")
@@ -236,7 +236,7 @@ async def register_with_hub() -> None:
 def _infer_endpoint(transport: str) -> Optional[str]:
     pod_ip = os.getenv("POD_IP") or os.getenv("HOSTNAME")
     if not pod_ip:
-        logger.error("Cannot infer sandbox endpoint – set HUB_URL")
+        logger.error("Cannot infer sandbox endpoint - set HUB_URL")
         return None
     if transport == "sse":
         return f"http://{pod_ip}:8000/sse"

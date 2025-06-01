@@ -3,7 +3,8 @@
 CHUK MCP Server Module
 
 This module provides the core CHUK MCP server functionality with
-session context management and automatic session injection.
+session context management, automatic session injection, and 
+enhanced chuk_artifacts integration.
 
 Simplified version - LLMs handle session context directly through tools.
 """
@@ -46,6 +47,14 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.datastructures import MutableHeaders
 from typing import Callable
+
+# Enhanced chuk_artifacts integration
+try:
+    from chuk_artifacts import ArtifactStore
+    CHUK_ARTIFACTS_AVAILABLE = True
+except ImportError:
+    CHUK_ARTIFACTS_AVAILABLE = False
+    ArtifactStore = None
 
 
 class AuthMiddleware:
@@ -105,7 +114,8 @@ class AuthMiddleware:
 
 class MCPServer:
     """
-    Manages the MCP (Messaging Control Protocol) server operations with session support.
+    Manages the MCP (Messaging Control Protocol) server operations with session support
+    and enhanced chuk_artifacts integration.
     
     Handles tool discovery, registration, execution, and session management.
     """
@@ -135,8 +145,66 @@ class MCPServer:
         # Session management
         self.current_session: Optional[str] = None
         
+        # Enhanced artifact store integration
+        self.artifact_store: Optional[ArtifactStore] = None
+        
         # Update the tool naming maps to ensure resolution works correctly
         update_naming_maps()
+    
+    async def _setup_artifact_store(self) -> None:
+        """Setup the artifact store if chuk_artifacts is available."""
+        if not CHUK_ARTIFACTS_AVAILABLE:
+            self.logger.info("chuk_artifacts not available - file management disabled")
+            return
+        
+        try:
+            # Get artifact store configuration from config
+            artifacts_config = self.config.get("artifacts", {})
+            
+            # Use environment variables or config defaults
+            import os
+            storage_provider = (
+                artifacts_config.get("storage_provider") or
+                os.getenv("ARTIFACT_STORAGE_PROVIDER", "filesystem")
+            )
+            session_provider = (
+                artifacts_config.get("session_provider") or
+                os.getenv("ARTIFACT_SESSION_PROVIDER", "memory")
+            )
+            bucket = (
+                artifacts_config.get("bucket") or
+                os.getenv("ARTIFACT_BUCKET", f"mcp-{self.server_name}")
+            )
+            
+            # Set up filesystem root if using filesystem storage
+            if storage_provider == "filesystem":
+                fs_root = (
+                    artifacts_config.get("filesystem_root") or
+                    os.getenv("ARTIFACT_FS_ROOT") or
+                    os.path.expanduser(f"~/.chuk_mcp_artifacts/{self.server_name}")
+                )
+                os.environ["ARTIFACT_FS_ROOT"] = fs_root
+            
+            # Create artifact store
+            self.artifact_store = ArtifactStore(
+                storage_provider=storage_provider,
+                session_provider=session_provider,
+                bucket=bucket
+            )
+            
+            # Validate configuration
+            config_status = await self.artifact_store.validate_configuration()
+            if (config_status["session"]["status"] == "ok" and 
+                config_status["storage"]["status"] == "ok"):
+                self.logger.info(
+                    f"Artifact store initialized: {storage_provider}/{session_provider} -> {bucket}"
+                )
+            else:
+                self.logger.warning(f"Artifact store configuration issues: {config_status}")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to setup artifact store: {e}")
+            self.artifact_store = None
     
     async def _import_tools_registry(self) -> Dict[str, Callable]:
         """
@@ -193,9 +261,11 @@ class MCPServer:
         Returns:
             Updated arguments with session context if applicable
         """
-        # Tools that require session context
+        # Enhanced list of tools that require session context
         session_required_tools = [
-            'write_file', 'upload_file', 'list_session_files', 'list_directory'
+            'write_file', 'upload_file', 'list_session_files', 'list_directory',
+            'read_file', 'delete_file', 'copy_file', 'move_file',
+            'get_file_metadata', 'get_presigned_url', 'get_storage_stats'
         ]
         
         # Check if this tool needs session context and doesn't have session_id
@@ -216,11 +286,15 @@ class MCPServer:
         """
         Run the MCP server with stdio communication.
         
-        Sets up server, tool listing, and tool execution handlers with session support.
+        Sets up server, tool listing, and tool execution handlers with session support
+        and enhanced artifact store integration.
         
         Args:
             custom_handlers: Optional dictionary of custom handlers to add to the server.
         """
+        # Setup artifact store if available
+        await self._setup_artifact_store()
+        
         # Ensure tools registry is initialized
         if not self.tools_registry:
             self.tools_registry = await self._import_tools_registry()
@@ -245,11 +319,19 @@ class MCPServer:
                 self.logger.warning("No tools available")
                 return []
             
-            return [
+            tools_list = [
                 func._mcp_tool
                 for func in self.tools_registry.values()
                 if hasattr(func, '_mcp_tool')
             ]
+            
+            # Log tool summary for debugging
+            tool_count = len(tools_list)
+            artifact_tools = len([t for t in tools_list if any(kw in t.name for kw in ['file', 'upload', 'write', 'read', 'list'])])
+            
+            self.logger.debug(f"Listing {tool_count} tools ({artifact_tools} artifact-related)")
+            
+            return tools_list
 
         @server.call_tool()
         async def call_tool(
@@ -257,9 +339,9 @@ class MCPServer:
             arguments: Dict[str, Any]
         ) -> List[Union[TextContent, ImageContent, EmbeddedResource]]:
             """
-            Execute a tool with session context support.
+            Execute a tool with session context support and enhanced error handling.
 
-            Enhanced with session management and improved tool resolution.
+            Enhanced with session management, improved tool resolution, and artifact store integration.
             """
             registry = self.tools_registry
 
@@ -280,7 +362,10 @@ class MCPServer:
                         resolved = matches[0]
 
             if resolved not in registry:
-                raise ValueError(f"Tool not found: {name}")
+                available_tools = ", ".join(sorted(registry.keys())[:10])  # Show first 10 for debugging
+                raise ValueError(
+                    f"Tool not found: {name}. Available tools: {available_tools}..."
+                )
 
             func = registry[resolved]
             
@@ -288,6 +373,10 @@ class MCPServer:
             enhanced_arguments = await self._inject_session_context(resolved, arguments)
             
             self.logger.debug("Executing '%s' with %s", resolved, enhanced_arguments)
+            
+            # Track if this is an artifact-related operation
+            is_artifact_tool = any(kw in resolved for kw in ['file', 'upload', 'write', 'read', 'list', 'delete', 'copy', 'move'])
+            
             try:
                 # Set session context if available
                 if self.current_session:
@@ -300,10 +389,20 @@ class MCPServer:
                 current_context = get_session_context()
                 if current_context and current_context != self.current_session:
                     self.current_session = current_context
+                    if is_artifact_tool:
+                        self.logger.debug(f"Session context updated to: {current_context}")
                 
             except Exception as exc:
-                self.logger.error("Tool '%s' failed: %s", resolved, exc, exc_info=True)
-                raise ValueError(f"Error processing tool '{resolved}': {exc}") from exc
+                error_msg = str(exc)
+                
+                # Enhanced error reporting for artifact tools
+                if is_artifact_tool and self.artifact_store is None:
+                    error_msg = f"Artifact store not available: {error_msg}"
+                elif "session" in error_msg.lower() and not self.current_session:
+                    error_msg = f"No session context available. {error_msg}"
+                
+                self.logger.error("Tool '%s' failed: %s", resolved, error_msg, exc_info=True)
+                raise ValueError(f"Error processing tool '{resolved}': {error_msg}") from exc
             finally:
                 # DON'T clear session context - let it persist between calls
                 # The session context should maintain state across tool executions
@@ -331,11 +430,11 @@ class MCPServer:
         server_type = self.config.get("server", {}).get("type", "stdio")
         
         if server_type == "stdio":
-            self.logger.info("Starting stdio server with session support")
+            self.logger.info("Starting stdio server with session support and artifact store")
             async with stdio_server() as (read_stream, write_stream):
                 await server.run(read_stream, write_stream, options)
         elif server_type == "sse":
-            self.logger.info("Starting MCP server over SSE with session support")
+            self.logger.info("Starting MCP server over SSE with session support and artifact store")
             # Get SSE server configuration
             sse_config = self.config.get("sse", {})
             host = sse_config.get("host", "127.0.0.1")
@@ -421,3 +520,20 @@ class MCPServer:
             Current session ID or None
         """
         return self.current_session
+    
+    def get_artifact_store(self) -> Optional[ArtifactStore]:
+        """
+        Get the artifact store instance.
+        
+        Returns:
+            ArtifactStore instance or None if not available
+        """
+        return self.artifact_store
+    
+    async def close(self) -> None:
+        """Clean up server resources."""
+        if self.artifact_store:
+            try:
+                await self.artifact_store.close()
+            except Exception as e:
+                self.logger.warning(f"Error closing artifact store: {e}")

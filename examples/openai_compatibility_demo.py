@@ -216,7 +216,7 @@ async def demo(only_openai_tools: bool, debug: bool) -> None:
     finally:
         await proxy.stop_servers()
         cfg.unlink(missing_ok=True)
-        print("\n🛑 proxy shut down – temp config deleted.")
+        print("\n🛑 proxy shut down - temp config deleted.")
 
 
 # ───────────────────────── main ───────────────────────────────────────
