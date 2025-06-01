@@ -43,6 +43,11 @@ chuk_mcp_runtime = [
   "py.typed",             # typing marker
 ]
 
+[dependency-groups]
+dev = [
+    "mcp>=1.6.0",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

@@ -12,7 +12,7 @@ import base64
 from typing import List, Dict, Any, Optional, Union, Set
 from datetime import datetime
 
-from chuk_mcp_runtime.common.mcp_tool_decorator import mcp_tool
+from chuk_mcp_runtime.common.mcp_tool_decorator import mcp_tool, TOOLS_REGISTRY
 from chuk_mcp_runtime.session.session_management import (
     get_effective_session_id,
     validate_session_parameter
@@ -53,7 +53,9 @@ DEFAULT_TOOL_CONFIG = {
         "move_file": {"enabled": True, "description": "Move/rename files"},
         "get_file_metadata": {"enabled": True, "description": "Get file metadata"},
         "get_presigned_url": {"enabled": False, "description": "Generate presigned URLs"},
-        "get_storage_stats": {"enabled": True, "description": "Get storage statistics"}
+        "get_storage_stats": {"enabled": True, "description": "Get storage statistics"},
+        "get_current_session": {"enabled": True, "description": "Get current session information"},
+        "set_session": {"enabled": True, "description": "Set session context"},
     }
 }
 
@@ -153,25 +155,9 @@ def _check_tool_enabled(tool_name: str):
 
 
 # ============================================================================
-# Conditionally Registered Tools Based on Configuration
+# Tool Functions - Always defined, registered dynamically
 # ============================================================================
 
-# We'll use a decorator that checks if the tool is enabled before registering
-def conditional_mcp_tool(tool_name: str, **kwargs):
-    """Decorator that only registers tools if they're enabled in config."""
-    def decorator(func):
-        # The tool will only be registered if it's enabled
-        # This check happens at import time after configuration
-        if is_tool_enabled(tool_name):
-            return mcp_tool(name=tool_name, **kwargs)(func)
-        else:
-            # Return the original function but don't register it
-            return func
-    return decorator
-
-
-# Core File Management Tools
-@conditional_mcp_tool("upload_file", description="Upload a file with base64 encoded content to the artifact store")
 async def upload_file(
     content: str,
     filename: str,
@@ -180,7 +166,20 @@ async def upload_file(
     session_id: Optional[str] = None,
     meta: Optional[Dict[str, Any]] = None
 ) -> str:
-    """Upload a file to the artifact store."""
+    """
+    Upload a file with base64 encoded content to the artifact store.
+    
+    Args:
+        content: Base64 encoded file content
+        filename: Name of the file to create
+        mime: MIME type of the file (default: application/octet-stream)
+        summary: Description of the file (default: File uploaded via MCP)
+        session_id: Session ID (optional, will use current session if not provided)
+        meta: Additional metadata for the file (optional)
+        
+    Returns:
+        Success message with artifact ID
+    """
     _check_availability()
     _check_tool_enabled("upload_file")
     effective_session = validate_session_parameter(session_id, "upload_file")
@@ -209,7 +208,6 @@ async def upload_file(
         raise ValueError(f"Failed to upload file: {str(e)}")
 
 
-@conditional_mcp_tool("write_file", description="Create or update a text file in the artifact store")
 async def write_file(
     content: str,
     filename: str,
@@ -218,7 +216,20 @@ async def write_file(
     session_id: Optional[str] = None,
     meta: Optional[Dict[str, Any]] = None
 ) -> str:
-    """Create or update a text file in the artifact store."""
+    """
+    Create or update a text file in the artifact store.
+    
+    Args:
+        content: Text content of the file
+        filename: Name of the file to create
+        mime: MIME type of the file (default: text/plain)
+        summary: Description of the file (default: File created via MCP)
+        session_id: Session ID (optional, will use current session if not provided)
+        meta: Additional metadata for the file (optional)
+        
+    Returns:
+        Success message with artifact ID
+    """
     _check_availability()
     _check_tool_enabled("write_file")
     effective_session = validate_session_parameter(session_id, "write_file")
@@ -246,13 +257,22 @@ async def write_file(
         raise ValueError(f"Failed to write file: {str(e)}")
 
 
-@conditional_mcp_tool("read_file", description="Read the content of a file from the artifact store")
 async def read_file(
     artifact_id: str,
     as_text: bool = True,
     session_id: Optional[str] = None
 ) -> Union[str, Dict[str, Any]]:
-    """Read the content of a file from the artifact store."""
+    """
+    Read the content of a file from the artifact store.
+    
+    Args:
+        artifact_id: Unique identifier of the file to read
+        as_text: Whether to return content as text (default: True) or as binary with metadata
+        session_id: Session ID (optional, will use current session if not provided)
+        
+    Returns:
+        File content as text, or dictionary with content and metadata if as_text=False
+    """
     _check_availability()
     _check_tool_enabled("read_file")
     effective_session = validate_session_parameter(session_id, "read_file")
@@ -280,12 +300,20 @@ async def read_file(
         raise ValueError(f"Failed to read file: {str(e)}")
 
 
-@conditional_mcp_tool("list_session_files", description="List all files in the current session")
 async def list_session_files(
     session_id: Optional[str] = None,
     include_metadata: bool = False
 ) -> List[Dict[str, Any]]:
-    """List all files in the specified session."""
+    """
+    List all files in the specified session.
+    
+    Args:
+        session_id: Session ID (optional, will use current session if not provided)
+        include_metadata: Whether to include full metadata for each file (default: False)
+        
+    Returns:
+        List of files in the session with basic or full metadata
+    """
     _check_availability()
     _check_tool_enabled("list_session_files")
     effective_session = validate_session_parameter(session_id, "list_session_files")
@@ -313,12 +341,20 @@ async def list_session_files(
         raise ValueError(f"Failed to list files: {str(e)}")
 
 
-@conditional_mcp_tool("delete_file", description="Delete a file from the artifact store")
 async def delete_file(
     artifact_id: str,
     session_id: Optional[str] = None
 ) -> str:
-    """Delete a file from the artifact store."""
+    """
+    Delete a file from the artifact store.
+    
+    Args:
+        artifact_id: Unique identifier of the file to delete
+        session_id: Session ID (optional, will use current session if not provided)
+        
+    Returns:
+        Success or failure message
+    """
     _check_availability()
     _check_tool_enabled("delete_file")
     effective_session = validate_session_parameter(session_id, "delete_file")
@@ -336,12 +372,20 @@ async def delete_file(
         raise ValueError(f"Failed to delete file: {str(e)}")
 
 
-@conditional_mcp_tool("list_directory", description="List files in a specific directory within the session")
 async def list_directory(
     directory_path: str,
     session_id: Optional[str] = None
 ) -> List[Dict[str, Any]]:
-    """List files in a specific directory within the session."""
+    """
+    List files in a specific directory within the session.
+    
+    Args:
+        directory_path: Path to the directory to list
+        session_id: Session ID (optional, will use current session if not provided)
+        
+    Returns:
+        List of files in the specified directory
+    """
     _check_availability()
     _check_tool_enabled("list_directory")
     effective_session = validate_session_parameter(session_id, "list_directory")
@@ -365,7 +409,6 @@ async def list_directory(
         raise ValueError(f"Failed to list directory: {str(e)}")
 
 
-@conditional_mcp_tool("copy_file", description="Copy a file within the same session")
 async def copy_file(
     artifact_id: str,
     new_filename: str,
@@ -373,7 +416,19 @@ async def copy_file(
     session_id: Optional[str] = None,
     meta: Optional[Dict[str, Any]] = None
 ) -> str:
-    """Copy a file within the same session."""
+    """
+    Copy a file within the same session.
+    
+    Args:
+        artifact_id: Unique identifier of the file to copy
+        new_filename: Name for the copied file
+        new_summary: Description for the copied file (optional)
+        session_id: Session ID (optional, will use current session if not provided)
+        meta: Additional metadata for the copied file (optional)
+        
+    Returns:
+        Success message with new artifact ID
+    """
     _check_availability()
     _check_tool_enabled("copy_file")
     effective_session = validate_session_parameter(session_id, "copy_file")
@@ -400,7 +455,6 @@ async def copy_file(
         raise ValueError(f"Failed to copy file: {str(e)}")
 
 
-@conditional_mcp_tool("move_file", description="Move/rename a file within the same session")
 async def move_file(
     artifact_id: str,
     new_filename: str,
@@ -408,7 +462,19 @@ async def move_file(
     session_id: Optional[str] = None,
     meta: Optional[Dict[str, Any]] = None
 ) -> str:
-    """Move/rename a file within the same session."""
+    """
+    Move/rename a file within the same session.
+    
+    Args:
+        artifact_id: Unique identifier of the file to move/rename
+        new_filename: New name for the file
+        new_summary: New description for the file (optional)
+        session_id: Session ID (optional, will use current session if not provided)
+        meta: Additional metadata for the moved file (optional)
+        
+    Returns:
+        Success message confirming the move
+    """
     _check_availability()
     _check_tool_enabled("move_file")
     effective_session = validate_session_parameter(session_id, "move_file")
@@ -433,12 +499,20 @@ async def move_file(
         raise ValueError(f"Failed to move file: {str(e)}")
 
 
-@conditional_mcp_tool("get_file_metadata", description="Get detailed metadata for a file")
 async def get_file_metadata(
     artifact_id: str,
     session_id: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Get detailed metadata for a file."""
+    """
+    Get detailed metadata for a file.
+    
+    Args:
+        artifact_id: Unique identifier of the file
+        session_id: Session ID (optional, will use current session if not provided)
+        
+    Returns:
+        Dictionary containing file metadata (size, type, creation date, etc.)
+    """
     _check_availability()
     _check_tool_enabled("get_file_metadata")
     effective_session = validate_session_parameter(session_id, "get_file_metadata")
@@ -454,13 +528,22 @@ async def get_file_metadata(
         raise ValueError(f"Failed to get metadata: {str(e)}")
 
 
-@conditional_mcp_tool("get_presigned_url", description="Get a presigned URL for downloading a file")
 async def get_presigned_url(
     artifact_id: str,
     expires_in: str = "medium",
     session_id: Optional[str] = None
 ) -> str:
-    """Get a presigned URL for downloading a file."""
+    """
+    Get a presigned URL for downloading a file.
+    
+    Args:
+        artifact_id: Unique identifier of the file
+        expires_in: URL expiration time - 'short', 'medium', or 'long' (default: medium)
+        session_id: Session ID (optional, will use current session if not provided)
+        
+    Returns:
+        Presigned URL for downloading the file
+    """
     _check_availability()
     _check_tool_enabled("get_presigned_url")
     effective_session = validate_session_parameter(session_id, "get_presigned_url")
@@ -482,11 +565,18 @@ async def get_presigned_url(
         raise ValueError(f"Failed to generate presigned URL: {str(e)}")
 
 
-@conditional_mcp_tool("get_storage_stats", description="Get statistics about the artifact store")
 async def get_storage_stats(
     session_id: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Get statistics about the artifact store."""
+    """
+    Get statistics about the artifact store.
+    
+    Args:
+        session_id: Session ID (optional, will use current session if not provided)
+        
+    Returns:
+        Dictionary with storage statistics including file count and total bytes
+    """
     _check_availability()
     _check_tool_enabled("get_storage_stats")
     effective_session = validate_session_parameter(session_id, "get_storage_stats")
@@ -512,6 +602,68 @@ async def get_storage_stats(
 # Registration and Utility Functions
 # ============================================================================
 
+async def get_current_session() -> Dict[str, Any]:
+    """
+    Get information about the current session.
+    
+    Returns:
+        Dictionary containing current session information
+    """
+    from chuk_mcp_runtime.session.session_management import get_session_context
+    
+    current_session = get_session_context()
+    
+    if current_session:
+        return {
+            "session_id": current_session,
+            "status": "active",
+            "message": f"Current session: {current_session}"
+        }
+    else:
+        return {
+            "session_id": None,
+            "status": "no_session",
+            "message": "No session context available. A session will be auto-created when needed."
+        }
+
+
+async def set_session_context_tool(session_id: str) -> str:
+    """
+    Set the session context for subsequent operations.
+    
+    Args:
+        session_id: Session ID to use for subsequent operations
+        
+    Returns:
+        Success message confirming the session was set
+    """
+    from chuk_mcp_runtime.session.session_management import set_session_context, normalize_session_id
+    
+    try:
+        normalized_id = normalize_session_id(session_id)
+        set_session_context(normalized_id)
+        return f"Session context set to: {normalized_id}"
+    except Exception as e:
+        raise ValueError(f"Failed to set session context: {str(e)}")
+
+
+# Map of tool name to function
+TOOL_FUNCTIONS = {
+    "upload_file": upload_file,
+    "write_file": write_file,
+    "read_file": read_file,
+    "list_session_files": list_session_files,
+    "delete_file": delete_file,
+    "list_directory": list_directory,
+    "copy_file": copy_file,
+    "move_file": move_file,
+    "get_file_metadata": get_file_metadata,
+    "get_presigned_url": get_presigned_url,
+    "get_storage_stats": get_storage_stats,
+    "get_current_session": get_current_session,
+    "set_session": set_session_context_tool,
+}
+
 async def register_artifacts_tools(config: Dict[str, Any] = None) -> bool:
     """Register configured artifact management tools with the MCP runtime."""
     if not CHUK_ARTIFACTS_AVAILABLE:
@@ -534,11 +686,25 @@ async def register_artifacts_tools(config: Dict[str, Any] = None) -> bool:
         logger.error(f"Failed to initialize artifact store: {e}")
         return False
     
-    # Tools are automatically registered via @conditional_mcp_tool decorators
-    # based on configuration
-    enabled_count = len(_enabled_tools)
+    # Now register the enabled tools dynamically
+    registered_count = 0
+    for tool_name in _enabled_tools:
+        if tool_name in TOOL_FUNCTIONS:
+            func = TOOL_FUNCTIONS[tool_name]
+            
+            # Get description from config
+            tool_config = DEFAULT_TOOL_CONFIG["tools"].get(tool_name, {})
+            description = tool_config.get("description", f"Artifact tool: {tool_name}")
+            
+            # Create the mcp_tool decorator and apply it
+            decorated_func = mcp_tool(name=tool_name, description=description)(func)
+            
+            # Register in the global registry
+            TOOLS_REGISTRY[tool_name] = decorated_func
+            registered_count += 1
+            logger.debug(f"Registered tool: {tool_name}")
     
-    logger.info(f"Registered {enabled_count} artifact management tools")
+    logger.info(f"Registered {registered_count} artifact management tools")
     logger.info(f"Enabled tools: {', '.join(sorted(_enabled_tools))}")
     
     return True
@@ -569,7 +735,13 @@ def get_enabled_tools() -> List[str]:
 ALL_ARTIFACT_TOOLS = list(DEFAULT_TOOL_CONFIG["tools"].keys())
 
 # Dynamic tool list based on configuration
-@property
+def get_artifact_tools() -> List[str]:
+    """Get currently enabled artifact tools."""
+    return get_enabled_tools()
+
+
+# Legacy property-style access (keeping for compatibility)
+@property  
 def ARTIFACT_TOOLS() -> List[str]:
     """Get currently enabled artifact tools."""
     return get_enabled_tools()

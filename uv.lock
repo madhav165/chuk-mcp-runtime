@@ -367,6 +367,11 @@ dev = [
     { name = "ruff" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "mcp" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "chuk-artifacts", specifier = ">=0.1.5" },
@@ -380,6 +385,9 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.6" },
 ]
+
+[package.metadata.requires-dev]
+dev = [{ name = "mcp", specifier = ">=1.6.0" }]
 
 [[package]]
 name = "chuk-sessions"

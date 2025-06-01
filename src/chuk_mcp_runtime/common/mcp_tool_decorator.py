@@ -36,9 +36,59 @@ except ImportError:
 
 # Global registry of tool functions (always async)
 TOOLS_REGISTRY: Dict[str, Callable[..., Any]] = {}
+TOOL_REGISTRY = TOOLS_REGISTRY
+
+def _extract_param_descriptions(func: Callable[..., Any]) -> Dict[str, str]:
+    """Extract parameter descriptions from function docstring."""
+    import inspect
+    
+    docstring = inspect.getdoc(func)
+    if not docstring:
+        return {}
+    
+    descriptions = {}
+    lines = docstring.split('\n')
+    
+    # Look for Args: section
+    in_args_section = False
+    for line in lines:
+        line = line.strip()
+        
+        if line.lower().startswith('args:'):
+            in_args_section = True
+            continue
+        elif line.lower().startswith(('returns:', 'raises:', 'yields:', 'note:')):
+            in_args_section = False
+            continue
+        
+        if in_args_section and ':' in line:
+            # Parse parameter descriptions like "param_name: Description text"
+            parts = line.split(':', 1)
+            if len(parts) == 2:
+                param_name = parts[0].strip()
+                description = parts[1].strip()
+                descriptions[param_name] = description
+    
+    return descriptions
+
 
 def _get_type_schema(annotation: Type) -> Dict[str, Any]:
-    """Map Python types to JSON Schema."""
+    """Map Python types to JSON Schema with better Optional handling."""
+    import typing
+    
+    # Handle Optional types (Union[X, None])
+    if hasattr(typing, 'get_origin') and hasattr(typing, 'get_args'):
+        origin = typing.get_origin(annotation)
+        args = typing.get_args(annotation)
+        
+        if origin is typing.Union:
+            # Check if it's Optional (Union[X, None])
+            if len(args) == 2 and type(None) in args:
+                # Get the non-None type
+                non_none_type = args[0] if args[1] is type(None) else args[1]
+                return _get_type_schema(non_none_type)
+    
+    # Handle basic types
     if annotation == str:
         return {"type": "string"}
     if annotation == int:
@@ -47,39 +97,96 @@ def _get_type_schema(annotation: Type) -> Dict[str, Any]:
         return {"type": "number"}
     if annotation == bool:
         return {"type": "boolean"}
+    
+    # Handle generic types
     origin = getattr(annotation, "__origin__", None)
     if origin is list:
         return {"type": "array"}
     if origin is dict:
         return {"type": "object"}
+    
+    # Handle string representations of types (from get_type_hints)
+    if isinstance(annotation, str):
+        if annotation in ('str', 'typing.Optional[str]', 'Optional[str]'):
+            return {"type": "string"}
+        elif annotation in ('int', 'typing.Optional[int]', 'Optional[int]'):
+            return {"type": "integer"}
+        elif annotation in ('bool', 'typing.Optional[bool]', 'Optional[bool]'):
+            return {"type": "boolean"}
+        elif annotation in ('float', 'typing.Optional[float]', 'Optional[float]'):
+            return {"type": "number"}
+    
+    # Special handling for common None-able types
+    if str(annotation).startswith('typing.Union') or str(annotation).startswith('typing.Optional'):
+        # Try to extract the base type from string representation
+        if 'str' in str(annotation):
+            return {"type": "string"}
+        elif 'int' in str(annotation):
+            return {"type": "integer"}
+        elif 'bool' in str(annotation):
+            return {"type": "boolean"}
+        elif 'float' in str(annotation):
+            return {"type": "number"}
+    
+    # Default fallback
     return {"type": "string"}
+
 
 async def create_input_schema(func: Callable[..., Any]) -> Dict[str, Any]:
     """
     Build a JSON Schema for the parameters of `func`, using Pydantic if available.
+    Enhanced to extract parameter descriptions from docstrings.
     """
     sig = inspect.signature(func)
+    param_descriptions = _extract_param_descriptions(func)
+    
     if HAS_PYDANTIC:
         fields: Dict[str, Any] = {}
         for name, param in sig.parameters.items():
             if name == "self" or name.startswith("__"):  # Skip internal parameters
                 continue
             ann = param.annotation if param.annotation is not inspect.Parameter.empty else str
-            fields[name] = (ann, ...)
+            
+            # Handle Optional parameters correctly
+            if param.default is not inspect.Parameter.empty:
+                fields[name] = (ann, param.default)
+            else:
+                fields[name] = (ann, ...)
+                
         Model = create_model(f"{func.__name__.capitalize()}Input", **fields)
-        return Model.model_json_schema()
+        schema = Model.model_json_schema()
+        
+        # Add descriptions from docstring
+        if "properties" in schema and param_descriptions:
+            for param_name, description in param_descriptions.items():
+                if param_name in schema["properties"]:
+                    schema["properties"][param_name]["description"] = description
+                    
+        return schema
     else:
         props: Dict[str, Any] = {}
         required = []
         hints = get_type_hints(func)
+        
         for name, param in sig.parameters.items():
             if name == "self" or name.startswith("__"):  # Skip internal parameters
                 continue
+                
             ann = hints.get(name, str)
-            props[name] = _get_type_schema(ann)
+            param_schema = _get_type_schema(ann)
+            
+            # Add description if available
+            if name in param_descriptions:
+                param_schema["description"] = param_descriptions[name]
+                
+            props[name] = param_schema
+            
+            # Only mark as required if no default value
             if param.default is inspect.Parameter.empty:
                 required.append(name)
+                
         return {"type": "object", "properties": props, "required": required}
+
 
 def mcp_tool(name: str = None, description: str = None):
     """

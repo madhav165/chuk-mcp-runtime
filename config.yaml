@@ -4,8 +4,8 @@ host:
   log_level: "INFO"
 
 server:
-  type: "sse"
-  auth: "bearer" # this line is needed to enable bearer auth
+  type: "stdio"
+  #auth: "bearer" # this line is needed to enable bearer auth
 
 # optional overrides
 sse:
@@ -37,6 +37,7 @@ artifacts:
   # Storage configuration
   storage_provider: "s3"  # "filesystem", "memory", "s3", "ibm_cos"
   session_provider: "redis"      # "memory", "redis"
+  bucket: "chuk-sandbox-2"
   
   # Tool configuration - fine-grained control over which tools are available
   tools:

@@ -139,8 +139,13 @@ class MCPServer:
         # Server name from configuration
         self.server_name = config.get("host", {}).get("name", "generic-mcp")
         
-        # Tools registry
-        self.tools_registry = tools_registry or TOOLS_REGISTRY
+        # Tools registry - prefer passed registry over global one
+        if tools_registry is not None:
+            self.tools_registry = tools_registry
+            self.logger.debug(f"Using passed tools registry with {len(tools_registry)} tools")
+        else:
+            self.tools_registry = TOOLS_REGISTRY
+            self.logger.debug(f"Using global tools registry with {len(TOOLS_REGISTRY)} tools")
         
         # Session management
         self.current_session: Optional[str] = None
@@ -272,13 +277,20 @@ class MCPServer:
         needs_session = any(pattern in tool_name for pattern in session_required_tools)
         
         if needs_session and 'session_id' not in arguments:
-            # Use current session context if available
-            if self.current_session:
-                arguments = arguments.copy()  # Don't modify original
-                arguments['session_id'] = self.current_session
-                self.logger.debug(f"Injected session_id '{self.current_session}' into {tool_name}")
-            else:
-                self.logger.warning(f"Tool '{tool_name}' may require session_id but none available")
+            # If no current session, create one automatically
+            if not self.current_session:
+                import uuid
+                import time
+                # Generate a session ID for this connection
+                timestamp = int(time.time())
+                session_suffix = str(uuid.uuid4().hex)[:8]
+                self.current_session = f"mcp-session-{timestamp}-{session_suffix}"
+                self.logger.info(f"Auto-created session for MCP client: {self.current_session}")
+            
+            # Inject the session ID
+            arguments = arguments.copy()  # Don't modify original
+            arguments['session_id'] = self.current_session
+            self.logger.debug(f"Injected session_id '{self.current_session}' into {tool_name}")
         
         return arguments
 
@@ -292,15 +304,281 @@ class MCPServer:
         Args:
             custom_handlers: Optional dictionary of custom handlers to add to the server.
         """
+        try:
+            # Setup artifact store if available
+            await self._setup_artifact_store()
+            
+            # Ensure tools registry is initialized and we're using the right one
+            if not self.tools_registry:
+                self.logger.warning("No tools registry available - importing from global")
+                self.tools_registry = await self._import_tools_registry()
+            else:
+                self.logger.info(f"Using existing tools registry with {len(self.tools_registry)} tools")
+                # Log some example tool names for debugging
+                if self.tools_registry:
+                    tool_names = list(self.tools_registry.keys())[:5]  # First 5 tools
+                    self.logger.debug(f"Sample tools: {', '.join(tool_names)}")
+            
+            # CRITICAL: Initialize any tool placeholders BEFORE creating server handlers
+            self.logger.info("Initializing tool metadata...")
+            await initialize_tool_registry()
+            
+            # Verify tools have metadata after initialization
+            tools_with_metadata = sum(1 for func in self.tools_registry.values() if hasattr(func, '_mcp_tool'))
+            self.logger.info(f"Tools with metadata after initialization: {tools_with_metadata}/{len(self.tools_registry)}")
+            
+            # Update naming maps after initializing tools
+            update_naming_maps()
+                
+            server = Server(self.server_name)
+
+            @server.list_tools()
+            async def list_tools() -> List[Tool]:
+                """
+                List available tools.
+                
+                Returns:
+                    List of tool descriptions.
+                """
+                try:
+                    self.logger.info(f"list_tools called - registry has {len(self.tools_registry)} tools")
+                    
+                    if not self.tools_registry:
+                        self.logger.warning("No tools available in registry")
+                        return []
+                    
+                    # Debug: Show all tool names
+                    all_tool_names = list(self.tools_registry.keys())
+                    self.logger.debug(f"All registered tools: {', '.join(all_tool_names)}")
+                    
+                    # Check which tools have _mcp_tool metadata
+                    tools_with_metadata = []
+                    tools_without_metadata = []
+                    
+                    self.logger.debug("Checking tools for metadata...")
+                    
+                    for name, func in self.tools_registry.items():
+                        try:
+                            if hasattr(func, '_mcp_tool'):
+                                tools_with_metadata.append(name)
+                                self.logger.debug(f"Tool {name} has metadata")
+                            else:
+                                tools_without_metadata.append(name)
+                                self.logger.debug(f"Tool {name} missing metadata")
+                        except Exception as e:
+                            self.logger.error(f"Error checking tool {name}: {e}")
+                            tools_without_metadata.append(name)
+                    
+                    self.logger.info(f"Tools with metadata: {len(tools_with_metadata)}")
+                    self.logger.info(f"Tools without metadata: {len(tools_without_metadata)}")
+                    
+                    if tools_without_metadata:
+                        self.logger.warning(f"Tools missing _mcp_tool metadata: {', '.join(tools_without_metadata[:5])}")
+                    
+                    self.logger.debug("Building tools list...")
+                    
+                    tools_list = []
+                    for func in self.tools_registry.values():
+                        try:
+                            if hasattr(func, '_mcp_tool'):
+                                tools_list.append(func._mcp_tool)
+                                self.logger.debug(f"Added tool to list: {func._mcp_tool.name}")
+                            else:
+                                self.logger.debug(f"Skipped tool without metadata")
+                        except Exception as e:
+                            self.logger.error(f"Error adding tool to list: {e}")
+                    
+                    # Log tool summary for debugging
+                    tool_count = len(tools_list)
+                    artifact_tools = len([t for t in tools_list if any(kw in t.name for kw in ['file', 'upload', 'write', 'read', 'list'])])
+                    
+                    self.logger.info(f"Returning {tool_count} tools ({artifact_tools} artifact-related)")
+                    
+                    return tools_list
+                    
+                except Exception as e:
+                    self.logger.error(f"Error in list_tools: {e}", exc_info=True)
+                    return []
+
+            @server.call_tool()
+            async def call_tool(
+                name: str,
+                arguments: Dict[str, Any]
+            ) -> List[Union[TextContent, ImageContent, EmbeddedResource]]:
+                """
+                Execute a tool with session context support and enhanced error handling.
+
+                Enhanced with session management, improved tool resolution, and artifact store integration.
+                """
+                try:
+                    registry = self.tools_registry
+
+                    # 1) direct hit
+                    if name in registry:
+                        resolved = name
+                    else:
+                        # 2) smart resolver (dot <-> underscore table)
+                        resolved = resolve_tool_name(name)
+
+                        # 3 / 4) last-chance suffix search
+                        if resolved not in registry:
+                            matches = [
+                                k for k in registry
+                                if k.endswith(f"_{name}") or k.endswith(f".{name}")
+                            ]
+                            if len(matches) == 1:
+                                resolved = matches[0]
+
+                    if resolved not in registry:
+                        available_tools = ", ".join(sorted(registry.keys())[:10])  # Show first 10 for debugging
+                        raise ValueError(
+                            f"Tool not found: {name}. Available tools: {available_tools}..."
+                        )
+
+                    func = registry[resolved]
+                    
+                    # Enhanced: Inject session context for tools that need it
+                    enhanced_arguments = await self._inject_session_context(resolved, arguments)
+                    
+                    self.logger.debug("Executing '%s' with %s", resolved, enhanced_arguments)
+                    
+                    # Track if this is an artifact-related operation
+                    is_artifact_tool = any(kw in resolved for kw in ['file', 'upload', 'write', 'read', 'list', 'delete', 'copy', 'move'])
+                    
+                    try:
+                        # Set session context if available
+                        if self.current_session:
+                            set_session_context(self.current_session)
+                        
+                        result = await func(**enhanced_arguments)
+                        
+                        # IMPORTANT: Update the server's session if the tool changed it
+                        # This allows tools like set_session to persist their changes
+                        current_context = get_session_context()
+                        if current_context and current_context != self.current_session:
+                            self.current_session = current_context
+                            if is_artifact_tool:
+                                self.logger.debug(f"Session context updated to: {current_context}")
+                        
+                    except Exception as exc:
+                        error_msg = str(exc)
+                        
+                        # Enhanced error reporting for artifact tools
+                        if is_artifact_tool and self.artifact_store is None:
+                            error_msg = f"Artifact store not available: {error_msg}"
+                        elif "session" in error_msg.lower() and not self.current_session:
+                            error_msg = f"No session context available. {error_msg}"
+                        
+                        self.logger.error("Tool '%s' failed: %s", resolved, error_msg, exc_info=True)
+                        raise ValueError(f"Error processing tool '{resolved}': {error_msg}") from exc
+                    finally:
+                        # DON'T clear session context - let it persist between calls
+                        # The session context should maintain state across tool executions
+                        pass
+
+                    # ---------- normalise result to MCP content ----------
+                    if (
+                        isinstance(result, list)
+                        and all(isinstance(r, (TextContent, ImageContent, EmbeddedResource)) for r in result)
+                    ):
+                        return result
+
+                    if isinstance(result, str):
+                        return [TextContent(type="text", text=result)]
+
+                    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+                    
+                except Exception as e:
+                    self.logger.error(f"Error in call_tool: {e}", exc_info=True)
+                    raise
+            
+            # Add any custom handlers
+            if custom_handlers:
+                for handler_name, handler_func in custom_handlers.items():
+                    self.logger.debug(f"Adding custom handler: {handler_name}")
+                    setattr(server, handler_name, handler_func)
+
+            options = server.create_initialization_options()
+            server_type = self.config.get("server", {}).get("type", "stdio")
+            
+            if server_type == "stdio":
+                self.logger.info("Starting stdio server with session support and artifact store")
+                async with stdio_server() as (read_stream, write_stream):
+                    await server.run(read_stream, write_stream, options)
+            elif server_type == "sse":
+                self.logger.info("Starting MCP server over SSE with session support and artifact store")
+                # Get SSE server configuration
+                sse_config = self.config.get("sse", {})
+                host = sse_config.get("host", "127.0.0.1")
+                port = sse_config.get("port", 8000)
+                sse_path = sse_config.get("sse_path", "/sse")
+                msg_path = sse_config.get("message_path", "/messages/")
+                
+                # Create the starlette app with routes
+                # Create the SSE transport instance
+                sse_transport = SseServerTransport(msg_path)
+                
+                async def handle_sse(request: Request):
+                    async with sse_transport.connect_sse(
+                        request.scope,
+                        request.receive,
+                        request._send
+                    ) as streams:
+                        await server.run(streams[0], streams[1], options)
+                    # Return empty response to avoid NoneType error
+                    return Response()
+                
+                routes = [
+                    Route(sse_path, endpoint=handle_sse, methods=["GET"]),
+                    Mount(msg_path, app=sse_transport.handle_post_message),
+                ]
+                
+                starlette_app = Starlette(routes=routes)
+                
+                starlette_app.add_middleware(
+                    AuthMiddleware,
+                    auth=self.config.get("server", {}).get("auth", None)
+                )
+                
+                config = uvicorn.Config(starlette_app, host=host, port=port, log_level="info")
+                uvicorn_server = uvicorn.Server(config)
+                await uvicorn_server.serve()
+            else:
+                raise ValueError(f"Unknown server type: {server_type}")
+                
+        except Exception as e:
+            self.logger.error(f"Error in serve method: {e}", exc_info=True)
+            raise
+        """
+        Run the MCP server with stdio communication.
+        
+        Sets up server, tool listing, and tool execution handlers with session support
+        and enhanced artifact store integration.
+        
+        Args:
+            custom_handlers: Optional dictionary of custom handlers to add to the server.
+        """
         # Setup artifact store if available
         await self._setup_artifact_store()
         
-        # Ensure tools registry is initialized
+        # Ensure tools registry is initialized and we're using the right one
         if not self.tools_registry:
+            self.logger.warning("No tools registry available - importing from global")
             self.tools_registry = await self._import_tools_registry()
+        else:
+            self.logger.info(f"Using existing tools registry with {len(self.tools_registry)} tools")
+            # Log some example tool names for debugging
+            if self.tools_registry:
+                tool_names = list(self.tools_registry.keys())[:5]  # First 5 tools
+                self.logger.debug(f"Sample tools: {', '.join(tool_names)}")
         
-        # Initialize any tool placeholders
+        # CRITICAL: Initialize any tool placeholders BEFORE creating server handlers
+        self.logger.info("Initializing tool metadata...")
         await initialize_tool_registry()
+        
+        # Verify tools have metadata after initialization
+        tools_with_metadata = sum(1 for func in self.tools_registry.values() if hasattr(func, '_mcp_tool'))
+        self.logger.info(f"Tools with metadata after initialization: {tools_with_metadata}/{len(self.tools_registry)}")
         
         # Update naming maps after initializing tools
         update_naming_maps()
@@ -315,23 +593,65 @@ class MCPServer:
             Returns:
                 List of tool descriptions.
             """
-            if not self.tools_registry:
-                self.logger.warning("No tools available")
+            try:
+                self.logger.info(f"list_tools called - registry has {len(self.tools_registry)} tools")
+                
+                if not self.tools_registry:
+                    self.logger.warning("No tools available in registry")
+                    return []
+                
+                # Debug: Show all tool names
+                all_tool_names = list(self.tools_registry.keys())
+                self.logger.debug(f"All registered tools: {', '.join(all_tool_names)}")
+                
+                # Check which tools have _mcp_tool metadata
+                tools_with_metadata = []
+                tools_without_metadata = []
+                
+                self.logger.debug("Checking tools for metadata...")
+                
+                for name, func in self.tools_registry.items():
+                    try:
+                        if hasattr(func, '_mcp_tool'):
+                            tools_with_metadata.append(name)
+                            self.logger.debug(f"Tool {name} has metadata")
+                        else:
+                            tools_without_metadata.append(name)
+                            self.logger.debug(f"Tool {name} missing metadata")
+                    except Exception as e:
+                        self.logger.error(f"Error checking tool {name}: {e}")
+                        tools_without_metadata.append(name)
+                
+                self.logger.info(f"Tools with metadata: {len(tools_with_metadata)}")
+                self.logger.info(f"Tools without metadata: {len(tools_without_metadata)}")
+                
+                if tools_without_metadata:
+                    self.logger.warning(f"Tools missing _mcp_tool metadata: {', '.join(tools_without_metadata[:5])}")
+                
+                self.logger.debug("Building tools list...")
+                
+                tools_list = []
+                for func in self.tools_registry.values():
+                    try:
+                        if hasattr(func, '_mcp_tool'):
+                            tools_list.append(func._mcp_tool)
+                            self.logger.debug(f"Added tool to list: {func._mcp_tool.name}")
+                        else:
+                            self.logger.debug(f"Skipped tool without metadata")
+                    except Exception as e:
+                        self.logger.error(f"Error adding tool to list: {e}")
+                
+                # Log tool summary for debugging
+                tool_count = len(tools_list)
+                artifact_tools = len([t for t in tools_list if any(kw in t.name for kw in ['file', 'upload', 'write', 'read', 'list'])])
+                
+                self.logger.info(f"Returning {tool_count} tools ({artifact_tools} artifact-related)")
+                
+                return tools_list
+                
+            except Exception as e:
+                self.logger.error(f"Error in list_tools: {e}", exc_info=True)
                 return []
-            
-            tools_list = [
-                func._mcp_tool
-                for func in self.tools_registry.values()
-                if hasattr(func, '_mcp_tool')
-            ]
-            
-            # Log tool summary for debugging
-            tool_count = len(tools_list)
-            artifact_tools = len([t for t in tools_list if any(kw in t.name for kw in ['file', 'upload', 'write', 'read', 'list'])])
-            
-            self.logger.debug(f"Listing {tool_count} tools ({artifact_tools} artifact-related)")
-            
-            return tools_list
 
         @server.call_tool()
         async def call_tool(
