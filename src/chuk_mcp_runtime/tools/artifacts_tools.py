@@ -626,46 +626,78 @@ TOOL_FUNCTIONS = {
     "get_storage_stats": get_storage_stats,
 }
 
-async def register_artifacts_tools(config: Dict[str, Any] = None) -> bool:
-    """Register configured artifact management tools with the MCP runtime."""
+# ============================================================================
+# Registration function for artifact-management helpers
+# ============================================================================
+
+async def register_artifacts_tools(config: Dict[str, Any] | None = None) -> bool:
+    """
+    Register artifact helpers according to *config*.
+
+    * If chuk_artifacts is unavailable **or** the YAML block is absent /
+      disabled, every artifact helper is stripped from ``TOOLS_REGISTRY``.
+    * Otherwise, only helpers whose own ``enabled: true`` flag is set in
+      `artifacts.tools` are kept.
+
+    Returns
+    -------
+    bool
+        ``True`` iff at least one helper is registered.
+    """
+    # Fast exit if chuk_artifacts missing
     if not CHUK_ARTIFACTS_AVAILABLE:
-        logger.warning("chuk_artifacts not available - cannot register tools")
+        for t in TOOL_FUNCTIONS:
+            TOOLS_REGISTRY.pop(t, None)
+        logger.info("chuk_artifacts not installed – artifact helpers disabled")
         return False
-    
-    # Configure tools based on config
-    if config:
-        configure_artifacts_tools(config)
-    
-    if not _enabled_tools:
-        logger.info("No artifact tools enabled in configuration")
+
+    art_cfg = (config or {}).get("artifacts", {})
+    if not art_cfg.get("enabled", False):
+        # remove everything and bail out
+        for t in TOOL_FUNCTIONS:
+            TOOLS_REGISTRY.pop(t, None)
+        logger.info("artifacts block disabled – no helpers registered")
         return False
-    
-    # Initialize the artifact store to validate configuration
-    try:
-        store = await get_artifact_store()
-        logger.info("Artifact store initialized successfully")
-    except Exception as e:
-        logger.error(f"Failed to initialize artifact store: {e}")
+
+    enabled_helpers = {
+        name
+        for name, tc in art_cfg.get("tools", {}).items()
+        if tc.get("enabled", False)
+    }
+    if not enabled_helpers:
+        for t in TOOL_FUNCTIONS:
+            TOOLS_REGISTRY.pop(t, None)
+        logger.info("artifacts block present but all helpers disabled")
         return False
-    
-    # Register the enabled tools - they're already decorated with @mcp_tool
-    registered_count = 0
-    for tool_name in _enabled_tools:
-        if tool_name in TOOL_FUNCTIONS:
-            func = TOOL_FUNCTIONS[tool_name]
-            
-            # Function should already be decorated with @mcp_tool
-            if hasattr(func, '_mcp_tool'):
-                TOOLS_REGISTRY[tool_name] = func
-                registered_count += 1
-                logger.debug(f"Registered tool: {tool_name}")
-            else:
-                logger.warning(f"Tool {tool_name} missing _mcp_tool metadata")
-    
-    logger.info(f"Registered {registered_count} artifact management tools")
-    logger.info(f"Enabled tools: {', '.join(sorted(_enabled_tools))}")
-    
-    return True
+
+    # Ensure the global artifact-store is initialised (raises if mis-configured)
+    store = await get_artifact_store()
+    logger.debug("Artifact store initialised: %s", store)
+
+    # Prune every previous placeholder
+    for t in TOOL_FUNCTIONS:
+        TOOLS_REGISTRY.pop(t, None)
+
+    # Register only the enabled helpers
+    registered = 0
+    for name in enabled_helpers:
+        fn = TOOL_FUNCTIONS[name]
+        # If still a placeholder, force initialisation
+        if getattr(fn, "_needs_init", False):
+            from chuk_mcp_runtime.common.mcp_tool_decorator import _initialize_tool
+            await _initialize_tool(name, fn)
+            fn = TOOLS_REGISTRY.get(name, fn)
+
+        TOOLS_REGISTRY[name] = fn
+        registered += 1
+        logger.debug("Registered artifact helper: %s", name)
+
+    logger.info(
+        "Registered %d artifact helper(s): %s",
+        registered,
+        ", ".join(sorted(enabled_helpers)),
+    )
+    return bool(registered)
 
 
 def get_artifacts_tools_info() -> Dict[str, Any]:

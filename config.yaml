@@ -34,39 +34,39 @@ proxy:
 #       module: "mcp_echo_server.echo_tools.tools"
 
 # Session Management Tools
-# session_tools:
-#   enabled: true  # Master switch for all session tools
+session_tools:
+  enabled: false  # Master switch for all session tools
   
-#   tools:
-#     # Core session operations
-#     get_current_session:
-#       enabled: true
-#       description: "Get information about the current session context"
+  tools:
+    # Core session operations
+    get_current_session:
+      enabled: true
+      description: "Get information about the current session context"
     
-#     set_session:
-#       enabled: true
-#       description: "Set the session context for subsequent operations"
+    set_session:
+      enabled: true
+      description: "Set the session context for subsequent operations"
     
-#     clear_session:
-#       enabled: true
-#       description: "Clear the current session context"
+    clear_session:
+      enabled: true
+      description: "Clear the current session context"
     
-#     # Session management operations
-#     list_sessions:
-#       enabled: true
-#       description: "List all active sessions"
+    # Session management operations
+    list_sessions:
+      enabled: true
+      description: "List all active sessions"
     
-#     get_session_info:
-#       enabled: true
-#       description: "Get detailed information about a specific session"
+    get_session_info:
+      enabled: true
+      description: "Get detailed information about a specific session"
     
-#     create_session:
-#       enabled: true
-#       description: "Create a new session with optional metadata"
+    create_session:
+      enabled: true
+      description: "Create a new session with optional metadata"
 
 # Artifact Management Tools
 artifacts:
-  enabled: true  # Master switch for all artifact tools
+  enabled: false  # Master switch for all artifact tools
   
   # Storage configuration
   storage_provider: "s3"  # "filesystem", "memory", "s3", "ibm_cos"

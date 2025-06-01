@@ -290,26 +290,23 @@ async def create_session_tool(
 # Registration Functions
 # ============================================================================
 
-async def register_session_tools(config: Dict[str, Any] = None) -> bool:
-    """Register session management tools with the MCP runtime."""
-    
-    # Configure tools based on config
-    if config:
-        configure_session_tools(config)
-    else:
-        # Use default configuration
-        configure_session_tools(DEFAULT_SESSION_TOOLS_CONFIG)
-    
-    if not _enabled_session_tools:
-        logger.info("No session tools enabled in configuration")
-        return False
-    
-    # Initialize the tool registry to ensure decorators are processed
-    from chuk_mcp_runtime.common.mcp_tool_decorator import initialize_tool_registry
-    await initialize_tool_registry()
-    
-    # Map of available session tools - they should now have _mcp_tool metadata
-    available_tools = {
+async def register_session_tools(config: Dict[str, Any] | None = None) -> bool:
+    """
+    Register (or remove) session-management tools according to *config*.
+
+    * If the `session_tools` block is missing **or** has `enabled: false`
+      the six helpers are removed from ``TOOLS_REGISTRY`` and the function
+      returns ``False``.
+    * Otherwise, only the helpers whose own `enabled: true` flag is set are
+      initialised (via `initialize_tool_registry`) and kept in the registry.
+
+    Returns
+    -------
+    bool
+        ``True`` iff at least one helper ends up registered.
+    """
+    # ------------------------------------------------------------------ 0. helpers
+    ALL_SESSION_TOOLS = {
         "get_current_session": get_current_session,
         "set_session": set_session_context_tool,
         "clear_session": clear_session_context_tool,
@@ -317,56 +314,57 @@ async def register_session_tools(config: Dict[str, Any] = None) -> bool:
         "get_session_info": get_session_info_tool,
         "create_session": create_session_tool,
     }
-    
-    # Register enabled tools
-    registered_count = 0
-    for tool_name in _enabled_session_tools:
-        if tool_name in available_tools:
-            tool_func = available_tools[tool_name]
-            
-            # Check if tool needs initialization
-            if hasattr(tool_func, '_needs_init') and tool_func._needs_init:
-                logger.debug(f"Initializing session tool: {tool_name}")
-                # The tool should have been initialized by initialize_tool_registry()
-                # Let's check if it's in the global registry now
-                from chuk_mcp_runtime.common.mcp_tool_decorator import TOOLS_REGISTRY as GLOBAL_REGISTRY
-                if tool_name in GLOBAL_REGISTRY:
-                    tool_func = GLOBAL_REGISTRY[tool_name]
-                
-            # Verify the tool has proper metadata after initialization
-            if hasattr(tool_func, '_mcp_tool'):
-                TOOLS_REGISTRY[tool_name] = tool_func
-                registered_count += 1
-                logger.debug(f"Registered session tool: {tool_name}")
-            else:
-                logger.warning(f"Session tool {tool_name} still missing _mcp_tool metadata after initialization")
-                
-                # Manual fallback - create the decorator manually
-                tool_config = DEFAULT_SESSION_TOOLS_CONFIG["tools"].get(tool_name, {})
-                description = tool_config.get("description", f"Session tool: {tool_name}")
-                
-                # Apply the decorator manually and initialize immediately
-                try:
-                    decorated_func = mcp_tool(name=tool_name, description=description)(tool_func)
-                    
-                    # Force initialization if needed
-                    if hasattr(decorated_func, '_needs_init') and decorated_func._needs_init:
-                        from chuk_mcp_runtime.common.mcp_tool_decorator import _initialize_tool
-                        await _initialize_tool(tool_name, decorated_func)
-                        # Get the initialized version
-                        if tool_name in TOOLS_REGISTRY:
-                            decorated_func = TOOLS_REGISTRY[tool_name]
-                    
-                    TOOLS_REGISTRY[tool_name] = decorated_func
-                    registered_count += 1
-                    logger.debug(f"Registered session tool with manual initialization: {tool_name}")
-                except Exception as e:
-                    logger.error(f"Failed to register session tool {tool_name}: {e}")
-    
-    logger.info(f"Registered {registered_count} session management tools")
-    logger.info(f"Enabled session tools: {', '.join(sorted(_enabled_session_tools))}")
-    
-    return registered_count > 0
+
+    def prune_all() -> None:
+        """Remove every session helper from TOOLS_REGISTRY (present or not)."""
+        for t in ALL_SESSION_TOOLS:
+            TOOLS_REGISTRY.pop(t, None)
+
+    # ------------------------------------------------------------------ 1. config gate
+    sess_cfg = (config or {}).get("session_tools", {})
+    if not sess_cfg.get("enabled", False):
+        prune_all()
+        logger.info("session_tools disabled – nothing registered")
+        return False
+
+    # Which helpers are individually enabled?
+    enabled_tools = {
+        name
+        for name, tcfg in sess_cfg.get("tools", {}).items()
+        if tcfg.get("enabled", False)
+    }
+    if not enabled_tools:
+        prune_all()
+        logger.info("session_tools block present but no helpers enabled")
+        return False
+
+    # ------------------------------------------------------------------ 2. (re)initialise registry metadata
+    from chuk_mcp_runtime.common.mcp_tool_decorator import initialize_tool_registry
+    await initialize_tool_registry()
+
+    # ------------------------------------------------------------------ 3. prune everything, then keep only wanted ones
+    prune_all()
+    registered = 0
+
+    for name in enabled_tools:
+        fn = ALL_SESSION_TOOLS[name]
+
+        # If the wrapper is still a placeholder, initialise it now
+        if getattr(fn, "_needs_init", False):
+            from chuk_mcp_runtime.common.mcp_tool_decorator import _initialize_tool
+            await _initialize_tool(name, fn)
+            fn = TOOLS_REGISTRY.get(name, fn)
+
+        TOOLS_REGISTRY[name] = fn
+        registered += 1
+        logger.debug("Registered session tool: %s", name)
+
+    logger.info(
+        "Registered %d session helper(s): %s",
+        registered,
+        ", ".join(sorted(enabled_tools)),
+    )
+    return bool(registered)
 
 
 def get_session_tools_info() -> Dict[str, Any]:

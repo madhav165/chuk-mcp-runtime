@@ -90,7 +90,10 @@ except ImportError:  # session tools missing
     async def register_session_tools(
         config: Dict[str, Any] | None = None,
     ) -> bool:  # noqa: D401
-        """Placeholder - returns False when session tools are unavailable."""
+        """Placeholder - returns False when session tools are unavailable or not configured."""
+        # Don't register anything if no config or no session_tools section
+        if not config or "session_tools" not in config:
+            return False
         return False
 
     def get_session_tools_info() -> Dict[str, Any]:  # noqa: D401
