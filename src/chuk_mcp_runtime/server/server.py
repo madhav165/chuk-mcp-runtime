@@ -102,6 +102,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
 # MCPServer
 # ------------------------------------------------------------------------------
 
+_ARTIFACT_RX = re.compile(
+    r"\b("
+    r"write_file|upload_file|read_file|delete_file|"
+    r"list_session_files|list_directory|copy_file|move_file|"
+    r"get_file_metadata|get_presigned_url|get_storage_stats"
+    r")\b"
+)
 
 class MCPServer:
     """Central MCP server with session & artifact-store support."""
@@ -176,33 +183,21 @@ class MCPServer:
     # ------------------------------------------------------------------ #
     # Session helpers                                                    #
     # ------------------------------------------------------------------ #
-
     async def _inject_session_context(
-        self, tool_name: str, args: Dict[str, Any]
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Auto-add `session_id` for artifact tools when caller omitted it."""
-        NEEDS_SESSION = (
-            "file",
-            "upload",
-            "write",
-            "read",
-            "list",
-            "delete",
-            "copy",
-            "move",
-            "metadata",
-            "presigned",
-            "stats",
-        )
-        if any(p in tool_name for p in NEEDS_SESSION) and "session_id" not in args:
+        """Auto-add `session_id` for true artifact helpers."""
+        if _ARTIFACT_RX.search(tool_name) and "session_id" not in args:
             if not self.current_session:
                 self.current_session = (
                     f"mcp-session-{int(time.time())}-{uuid.uuid4().hex[:8]}"
                 )
                 self.logger.info("Auto-created session: %s", self.current_session)
-            args = args.copy()
-            args["session_id"] = self.current_session
+            args = {**args, "session_id": self.current_session}
         return args
+
 
     # ------------------------------------------------------------------ #
     # Public API                                                         #
@@ -233,49 +228,65 @@ class MCPServer:
 
         # ----------------------------- call_tool ----------------------------- #
 
+        # make sure _ARTIFACT_RX is imported / defined in the module
         @server.call_tool()
         async def call_tool(
-            name: str, arguments: Dict[str, Any]
+            name: str,
+            arguments: Dict[str, Any],
         ) -> List[Union[TextContent, ImageContent, EmbeddedResource]]:
-
+            """Execute a tool, with optional session management for artifact helpers."""
             registry = self.tools_registry
 
-            # 1) direct or resolved lookup
+            # ── name resolution ───────────────────────────────────────────────────
             resolved = name if name in registry else resolve_tool_name(name)
             if resolved not in registry:
+                # last-chance suffix search  (proxy.write_file  /  foo.write_file_v2)
                 matches = [k for k in registry if k.endswith(f"_{name}") or k.endswith(f".{name}")]
                 if len(matches) == 1:
                     resolved = matches[0]
-            if resolved not in registry:
+            if resolved not in registry:  # still not found
                 raise ValueError(f"Tool not found: {name}")
 
             func = registry[resolved]
+
+            # ── auto-inject session_id if needed ──────────────────────────────────
             arguments = await self._inject_session_context(resolved, arguments)
 
-            # Execute ---------------------------------------------------------
+            # is this an artifact helper?
+            is_artifact_tool = _ARTIFACT_RX.search(resolved) is not None
+
+            # ── execute ───────────────────────────────────────────────────────────
             try:
                 if self.current_session:
                     set_session_context(self.current_session)
 
                 result = await func(**arguments)
 
-                # if tool set/changed the session itself
+                # did the tool itself change the session (e.g. set_session)?
                 new_ctx = get_session_context()
                 if new_ctx and new_ctx != self.current_session:
                     self.current_session = new_ctx
 
             except Exception as exc:
                 self.logger.error("Tool '%s' failed: %s", resolved, exc, exc_info=True)
-                raise
+                # ⚠️  convert every tooling error to ValueError for callers/tests
+                raise ValueError(str(exc)) from exc
 
-            # Wrap artifact result with session_id ---------------------------
-            result = {
-                "session_id": self.current_session,
-                "content": result,
-                "isError": False,
-            }
+            # ── wrap artifact result with session_id (only for file helpers) ─────
+            if is_artifact_tool:
+                # normalise to the canonical dict shape expected by front-ends
+                wrapped: Dict[str, Any]
+                if isinstance(result, dict) and "content" in result and "isError" in result:
+                    wrapped = {**result, "session_id": self.current_session}
+                else:
+                    wrapped = {
+                        "session_id": self.current_session,
+                        "content": result,
+                        "isError": False,
+                    }
+                result = wrapped  # continue with JSON serialisation below
 
-            # Normalise to MCP content ---------------------------------------
+            # ── convert to MCP content objects ────────────────────────────────────
             if (
                 isinstance(result, list)
                 and all(isinstance(r, (TextContent, ImageContent, EmbeddedResource)) for r in result)
@@ -285,7 +296,9 @@ class MCPServer:
             if isinstance(result, str):
                 return [TextContent(type="text", text=result)]
 
+            # everything else → JSON string
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
 
         # custom proxy / etc. handlers ---------------------------------------
         if custom_handlers:

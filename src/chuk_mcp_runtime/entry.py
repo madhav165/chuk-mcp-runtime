@@ -11,6 +11,10 @@ import sys
 from inspect import iscoroutinefunction
 from typing import Any, Iterable, List, Optional, Tuple
 
+from dotenv import load_dotenv
+load_dotenv()  
+
+
 from chuk_mcp_runtime.common.mcp_tool_decorator import (
     TOOLS_REGISTRY,               # global “name → wrapper”
     initialize_tool_registry,
