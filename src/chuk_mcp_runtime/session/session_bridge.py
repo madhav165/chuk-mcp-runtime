@@ -43,12 +43,24 @@ _manager: Optional[SessionManager] = None
 
 
 def get_session_manager() -> SessionManager:  # noqa: D401
-    """Return (and lazily create) the shared :class:`SessionManager`."""
+    """Return (and lazily create) the shared :class:`SessionManager`.
+
+    Priority for sandbox detection:
+        2. CHUK_SANDBOX_ID     - convenience alias
+        3. MCP_SANDBOX_ID      - legacy name kept for back-compat
+        4. "mcp-runtime"       - library default
+    """
     global _manager
     if _manager is None:
-        sandbox = os.getenv("SANDBOX_ID", os.getenv("MCP_SANDBOX_ID", "mcp-runtime"))
+        sandbox = (
+            os.getenv("SANDBOX_ID")
+            or os.getenv("CHUK_SANDBOX_ID")
+            or os.getenv("MCP_SANDBOX_ID")
+            or "mcp-runtime"
+        )
         _manager = SessionManager(sandbox_id=sandbox)
     return _manager
+
 
 
 # ─────────────────────── convenience aliases ───────────────────────

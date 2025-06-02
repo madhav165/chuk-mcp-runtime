@@ -2,7 +2,6 @@
 host:
   name: "chuk-mcp-runtime"
   log_level: "INFO"
-  sandbox_id: dev
 
 server:
   type: "stdio"

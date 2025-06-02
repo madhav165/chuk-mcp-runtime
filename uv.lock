@@ -317,7 +317,7 @@ wheels = [
 
 [[package]]
 name = "chuk-artifacts"
-version = "0.1.6"
+version = "0.1.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aioboto3" },
@@ -329,7 +329,7 @@ dependencies = [
     { name = "redis" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7d/94/15615ca8d39515c1607a102d357022acbec3d4177799a28b0ab009782e07/chuk_artifacts-0.1.6-py3-none-any.whl", hash = "sha256:7508137f34d498d4c0d2335f454ade112314973d5a19a38aadc1ecb4cbcb273d", size = 41299 },
+    { url = "https://files.pythonhosted.org/packages/c2/2c/e85411afdbd7843bf67e4ce7a4bf4964f6f6c073381ec5a4c36464ab5a30/chuk_artifacts-0.1.7-py3-none-any.whl", hash = "sha256:66d77e3978f57e7567aba7626c06e5132bf56d8990bf3233ae01316acbfb314a", size = 41300 },
 ]
 
 [[package]]
@@ -348,7 +348,7 @@ wheels = [
 
 [[package]]
 name = "chuk-mcp-runtime"
-version = "0.1.40"
+version = "0.1.42"
 source = { editable = "." }
 dependencies = [
     { name = "chuk-artifacts" },
@@ -375,8 +375,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "chuk-artifacts", specifier = ">=0.1.6" },
-    { name = "chuk-sessions", specifier = ">=0.1.2" },
+    { name = "chuk-artifacts", specifier = ">=0.1.7" },
+    { name = "chuk-sessions", specifier = ">=0.1.3" },
     { name = "chuk-tool-processor", specifier = ">=0.1.7" },
     { name = "cryptography", specifier = ">=44.0.3" },
     { name = "mcp", specifier = ">=1.6.0" },
@@ -393,7 +393,7 @@ dev = [{ name = "mcp", specifier = ">=1.6.0" }]
 
 [[package]]
 name = "chuk-sessions"
-version = "0.1.2"
+version = "0.1.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
@@ -401,7 +401,7 @@ dependencies = [
     { name = "redis" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a1/af/14afbd4401ca0911054c09e6c5b8264caa1a720f83d92cc18d90fe4f9fc6/chuk_sessions-0.1.2-py3-none-any.whl", hash = "sha256:70efde1792a6714a9b8ea7c2746d150e40c7c9ee7959394cb0edf1c2b7738486", size = 18933 },
+    { url = "https://files.pythonhosted.org/packages/1a/1a/f42d4058ba331d4f041cc635b11eebf9fd6a27db637fd53d79e11cc482ad/chuk_sessions-0.1.3-py3-none-any.whl", hash = "sha256:6c3bf4dac56dd64ae91a7e481054e30edd5f211e0c58a493d0ee4c56a6a8e585", size = 18473 },
 ]
 
 [[package]]
