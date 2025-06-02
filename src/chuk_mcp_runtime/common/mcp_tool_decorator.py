@@ -7,9 +7,10 @@ with automatic input schema generation and configurable timeouts.
 """
 import inspect
 import importlib
+import logging
 from functools import wraps
 from typing import Any, Callable, Dict, Type, TypeVar, get_type_hints, Optional, List, Union
-import logging
+from inspect import iscoroutinefunction, isasyncgenfunction 
 
 T = TypeVar("T")
 
@@ -188,47 +189,117 @@ async def create_input_schema(func: Callable[..., Any]) -> Dict[str, Any]:
 
 
 def mcp_tool(
-    name: str = None, 
-    description: str = None, 
-    timeout: Optional[Union[int, float]] = None
+    name: str | None = None,
+    description: str | None = None,
+    timeout: Optional[Union[int, float]] = None,
 ):
     """
-    Decorator to register an async tool with optional timeout configuration.
-    Only works with async functions - no synchronous functions allowed.
-    
-    Args:
-        name: Tool name (defaults to function name)
-        description: Tool description (defaults to docstring)
-        timeout: Tool-specific timeout in seconds (overrides global timeout)
-    """
-    def decorator(original_func: Callable[..., Any]):
-        # Ensure function is async
-        if not inspect.iscoroutinefunction(original_func):
-            raise TypeError(f"Function {original_func.__name__} must be async (use 'async def')")
-            
-        tool_name = name or original_func.__name__
-        tool_desc = description or (original_func.__doc__ or "").strip() or f"Tool: {tool_name}"
+    Register an **async** tool (coroutine *or* async-generator).
 
-        # Store a reference to the original function
-        @wraps(original_func)
-        async def wrapper(*args, **kwargs):
-            # Forward all arguments directly to the original function
-            return await original_func(*args, **kwargs)
+    Parameters
+    ----------
+    name          custom tool name (defaults to function name)
+    description   fallback to function docstring
+    timeout       per-tool timeout (seconds)
+    """
+
+    def decorator(original_func: Callable[..., Any]):
+        # 1) ensure async coroutine OR async-generator
+        if not (
+            iscoroutinefunction(original_func) or isasyncgenfunction(original_func)
+        ):
+            raise TypeError(
+                f"{original_func.__name__} must be async (coroutine or generator)"
+            )
+
+        tool_name = name or original_func.__name__
+        tool_desc = description or (original_func.__doc__ or "").strip() or tool_name
+
+        # 2) Create different wrappers based on function type
+        if isasyncgenfunction(original_func):
+            # For async generators, create an async generator wrapper
+            @wraps(original_func)
+            async def async_gen_wrapper(*args, **kwargs):
+                async for item in original_func(*args, **kwargs):
+                    yield item
             
-        # We'll set up the function's schema and metadata later during initialization
+            wrapper = async_gen_wrapper
+        else:
+            # For regular async functions, create a coroutine wrapper
+            @wraps(original_func)
+            async def async_wrapper(*args, **kwargs):
+                return await original_func(*args, **kwargs)
+            
+            wrapper = async_wrapper
+
+        # attach bookkeeping – schema & Tool will be added later
         wrapper._needs_init = True
         wrapper._init_name = tool_name
         wrapper._init_desc = tool_desc
         wrapper._orig_func = original_func
-        wrapper._tool_timeout = timeout  # Store tool-specific timeout
-        
-        # Register immediately
+        wrapper._tool_timeout = timeout
+
         TOOLS_REGISTRY[tool_name] = wrapper
-        
         return wrapper
 
     return decorator
 
+
+# ────────────────────────────── Boot-time initialisation ─────────────────────
+async def _initialize_tool(tool_name: str, placeholder: Callable[..., Any]):
+    """Build schema + Tool object and replace placeholder in registry."""
+    if not getattr(placeholder, "_needs_init", False):
+        return
+
+    # Fixed: use create_input_schema instead of _build_input_schema
+    schema = await create_input_schema(placeholder._orig_func)
+    tool_obj = Tool(
+        name=placeholder._init_name,
+        description=placeholder._init_desc,
+        inputSchema=schema,
+    )
+
+    # Create final wrapper based on original function type
+    if isasyncgenfunction(placeholder._orig_func):
+        # For async generators
+        @wraps(placeholder._orig_func)
+        async def final_wrapper(*args, **kwargs):
+            try:
+                async for item in placeholder._orig_func(*args, **kwargs):
+                    yield item
+            except TypeError as exc:
+                sig = inspect.signature(placeholder._orig_func)
+                valid = [p for p in sig.parameters if not p.startswith("__")]
+                logging.error(
+                    "Error calling %s: %s. Valid parameters: %s",
+                    tool_name,
+                    exc,
+                    valid,
+                )
+                raise
+    else:
+        # For regular async functions
+        @wraps(placeholder._orig_func)
+        async def final_wrapper(*args, **kwargs):
+            try:
+                return await placeholder._orig_func(*args, **kwargs)
+            except TypeError as exc:
+                sig = inspect.signature(placeholder._orig_func)
+                valid = [p for p in sig.parameters if not p.startswith("__")]
+                logging.error(
+                    "Error calling %s: %s. Valid parameters: %s",
+                    tool_name,
+                    exc,
+                    valid,
+                )
+                raise
+
+    final_wrapper._mcp_tool = tool_obj
+    final_wrapper._tool_timeout = getattr(placeholder, "_tool_timeout", None)
+
+    TOOLS_REGISTRY[tool_name] = final_wrapper
+    placeholder._needs_init = False  # mark done
+    
 async def initialize_tool_registry():
     """
     Initialize all tools in the registry that need initialization.
@@ -236,40 +307,6 @@ async def initialize_tool_registry():
     for tool_name, func in list(TOOLS_REGISTRY.items()):
         if hasattr(func, '_needs_init') and func._needs_init:
             await _initialize_tool(tool_name, func)
-
-async def _initialize_tool(tool_name: str, placeholder: Callable):
-    """Initialize a specific tool."""
-    if not hasattr(placeholder, '_needs_init') or not placeholder._needs_init:
-        return
-        
-    original_func = placeholder._orig_func
-    schema = await create_input_schema(original_func)
-    tool = Tool(
-        name=placeholder._init_name, 
-        description=placeholder._init_desc, 
-        inputSchema=schema
-    )
-    
-    @wraps(original_func)
-    async def wrapper(*args, **kwargs):
-        try:
-            # Forward all arguments directly to the original function
-            return await original_func(*args, **kwargs)
-        except TypeError as e:
-            # Better error handling for parameter mismatches
-            sig = inspect.signature(original_func)
-            valid_params = [p for p in sig.parameters if not p.startswith('__')]
-            logging.error(f"Error calling {tool_name}: {e}. Valid parameters: {valid_params}")
-            raise
-    
-    # Attach metadata
-    wrapper._mcp_tool = tool
-    wrapper._needs_init = False
-    wrapper._orig_func = original_func
-    wrapper._tool_timeout = getattr(placeholder, '_tool_timeout', None)  # Preserve timeout
-    
-    # Replace in registry
-    TOOLS_REGISTRY[tool_name] = wrapper
 
 def get_tool_timeout(tool_name: str, default_timeout: float = 60.0) -> float:
     """

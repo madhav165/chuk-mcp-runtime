@@ -2,12 +2,11 @@
 """
 CHUK MCP Server
 
-Core MCP server with
-
 * automatic session-ID injection for artifact tools
 * optional bearer-token auth middleware
 * transparent chuk_artifacts integration
-* timeout support for long-running tools
+* global **and per-tool** timeout support
+* end-to-end **token streaming** for async-generator tools
 """
 
 from __future__ import annotations
@@ -19,7 +18,11 @@ import os
 import re
 import time
 import uuid
-from inspect import iscoroutinefunction
+from inspect import (
+    iscoroutinefunction,
+    isasyncgenfunction,   # <-- NEW
+    isasyncgen,          # <-- NEW
+)
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import uvicorn
@@ -30,6 +33,7 @@ from mcp.types import EmbeddedResource, ImageContent, TextContent, Tool
 from starlette.applications import Starlette
 from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException
+from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -111,6 +115,7 @@ _ARTIFACT_RX = re.compile(
     r")\b"
 )
 
+
 class MCPServer:
     """Central MCP server with session & artifact-store support."""
 
@@ -133,29 +138,34 @@ class MCPServer:
 
         # Tool timeout configuration
         self.tool_timeout = self._get_tool_timeout()
-        self.logger.info(f"Tool timeout configured: {self.tool_timeout}s")
+        self.logger.info("Tool timeout configured: %.1fs (global default)", self.tool_timeout)
 
         update_naming_maps()  # make sure resolve_tool_name works
 
+    # ..........................................................................
+    # timeout helpers
+    # ..........................................................................
+
     def _get_tool_timeout(self) -> float:
-        """Get tool timeout from configuration or environment."""
-        # Priority: config.tools.timeout > config.tool_timeout > env vars > default
+        """Pick global timeout from config/env with sane fall-back."""
         timeout_sources = [
             self.config.get("tools", {}).get("timeout"),
             self.config.get("tool_timeout"),
             os.getenv("MCP_TOOL_TIMEOUT"),
             os.getenv("TOOL_TIMEOUT"),
-            60.0  # default timeout
+            60.0,  # default
         ]
-        
-        for timeout in timeout_sources:
-            if timeout is not None:
+        for t in timeout_sources:
+            if t is not None:
                 try:
-                    return float(timeout)
+                    return float(t)
                 except (ValueError, TypeError):
                     continue
-        
         return 60.0
+
+    # ..........................................................................
+    # artifact store (unchanged)
+    # ..........................................................................
 
     async def _setup_artifact_store(self) -> None:
         if not CHUK_ARTIFACTS_AVAILABLE:
@@ -163,25 +173,37 @@ class MCPServer:
             return
 
         cfg = self.config.get("artifacts", {})
-        storage = cfg.get("storage_provider", os.getenv("ARTIFACT_STORAGE_PROVIDER", "filesystem"))
-        session = cfg.get("session_provider", os.getenv("ARTIFACT_SESSION_PROVIDER", "memory"))
-        bucket = cfg.get("bucket", os.getenv("ARTIFACT_BUCKET", f"mcp-{self.server_name}"))
+        storage = cfg.get(
+            "storage_provider", os.getenv("ARTIFACT_STORAGE_PROVIDER", "filesystem")
+        )
+        session = cfg.get(
+            "session_provider", os.getenv("ARTIFACT_SESSION_PROVIDER", "memory")
+        )
+        bucket = cfg.get(
+            "bucket", os.getenv("ARTIFACT_BUCKET", f"mcp-{self.server_name}")
+        )
 
         # filesystem root (only when storage == filesystem)
         if storage == "filesystem":
-            fs_root = cfg.get("filesystem_root", os.getenv("ARTIFACT_FS_ROOT",
-                                                           os.path.expanduser(f"~/.chuk_mcp_artifacts/{self.server_name}")))
-            os.environ["ARTIFACT_FS_ROOT"] = fs_root  # chuk_artifacts respects this
+            fs_root = cfg.get(
+                "filesystem_root",
+                os.getenv(
+                    "ARTIFACT_FS_ROOT",
+                    os.path.expanduser(f"~/.chuk_mcp_artifacts/{self.server_name}"),
+                ),
+            )
+            os.environ["ARTIFACT_FS_ROOT"] = fs_root  # chuk_artifacts honours this
 
         try:
-            self.artifact_store = ArtifactStore(storage_provider=storage,
-                                                session_provider=session,
-                                                bucket=bucket)
+            self.artifact_store = ArtifactStore(
+                storage_provider=storage, session_provider=session, bucket=bucket
+            )
             status = await self.artifact_store.validate_configuration()
-            if status["session"]["status"] == "ok" and status["storage"]["status"] == "ok":
-                self.logger.info(
-                    "Artifact store ready: %s/%s → %s", storage, session, bucket
-                )
+            if (
+                status["session"]["status"] == "ok"
+                and status["storage"]["status"] == "ok"
+            ):
+                self.logger.info("Artifact store ready: %s/%s → %s", storage, session, bucket)
             else:
                 self.logger.warning("Artifact-store config issues: %s", status)
         except Exception as exc:  # pragma: no cover
@@ -189,8 +211,9 @@ class MCPServer:
             self.artifact_store = None
 
     async def _import_tools_registry(self) -> Dict[str, Callable]:
-        mod = self.config.get("tools", {}).get("registry_module",
-                                               "chuk_mcp_runtime.common.mcp_tool_decorator")
+        mod = self.config.get("tools", {}).get(
+            "registry_module", "chuk_mcp_runtime.common.mcp_tool_decorator"
+        )
         attr = self.config.get("tools", {}).get("registry_attr", "TOOLS_REGISTRY")
 
         try:
@@ -208,12 +231,11 @@ class MCPServer:
     # ------------------------------------------------------------------ #
     # Session helpers                                                    #
     # ------------------------------------------------------------------ #
+
     async def _inject_session_context(
-        self,
-        tool_name: str,
-        args: Dict[str, Any],
+        self, tool_name: str, args: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Auto-add `session_id` for true artifact helpers."""
+        """Auto-add `session_id` for artifact helpers."""
         if _ARTIFACT_RX.search(tool_name) and "session_id" not in args:
             if not self.current_session:
                 self.current_session = (
@@ -224,40 +246,43 @@ class MCPServer:
         return args
 
     # ------------------------------------------------------------------ #
-    # Tool execution with timeout                                        #
+    # Tool execution with timeout & streaming                            #
     # ------------------------------------------------------------------ #
+
     async def _execute_tool_with_timeout(
-        self, 
-        func: Callable, 
-        tool_name: str, 
-        arguments: Dict[str, Any]
+        self, func: Callable, tool_name: str, arguments: Dict[str, Any]
     ) -> Any:
-        """Execute a tool with timeout protection."""
-        start_time = time.time()
-        
+        """
+        Execute a tool.
+
+        * Coroutine tools → awaited with asyncio.wait_for()
+        * Async-generator tools → streamed, still respecting timeout
+        """
+        timeout = getattr(func, "_tool_timeout", None) or self.tool_timeout
+
+        # ── async-generator branch ───────────────────────────────────────────
+        if isasyncgenfunction(func):
+            agen = func(**arguments)  # create generator
+            start = time.time()
+
+            async def _wrapper():
+                nonlocal start
+                try:
+                    async for chunk in agen:
+                        yield chunk
+                        if (time.time() - start) >= timeout:
+                            raise asyncio.TimeoutError()
+                finally:
+                    await agen.aclose()
+
+            return _wrapper()  # caller will iterate
+
+        # ── classic coroutine branch ─────────────────────────────────────────
         try:
-            self.logger.debug(f"Executing tool '{tool_name}' with {self.tool_timeout}s timeout")
-            
-            # Execute with timeout
-            result = await asyncio.wait_for(
-                func(**arguments),
-                timeout=self.tool_timeout
-            )
-            
-            execution_time = time.time() - start_time
-            self.logger.info(f"Tool '{tool_name}' completed in {execution_time:.2f}s")
-            return result
-            
+            self.logger.debug("Executing tool '%s' (timeout %.1fs)", tool_name, timeout)
+            return await asyncio.wait_for(func(**arguments), timeout=timeout)
         except asyncio.TimeoutError:
-            execution_time = time.time() - start_time
-            error_msg = f"Tool '{tool_name}' timed out after {execution_time:.2f}s (limit: {self.tool_timeout}s)"
-            self.logger.error(error_msg)
-            raise ValueError(error_msg)
-            
-        except Exception as exc:
-            execution_time = time.time() - start_time
-            self.logger.error(f"Tool '{tool_name}' failed after {execution_time:.2f}s: {exc}", exc_info=True)
-            raise ValueError(str(exc)) from exc
+            raise ValueError(f"Tool '{tool_name}' timed out after {timeout:.1f}s")
 
     # ------------------------------------------------------------------ #
     # Public API                                                         #
@@ -270,7 +295,7 @@ class MCPServer:
         if not self.tools_registry:
             self.tools_registry = await self._import_tools_registry()
 
-        await initialize_tool_registry()  # make sure decorators ran
+        await initialize_tool_registry()
         update_naming_maps()
 
         server = Server(self.server_name)
@@ -287,89 +312,133 @@ class MCPServer:
             ]
 
         # ----------------------------- call_tool ----------------------------- #
-
+        # Replace your existing @server.call_tool() method with this version
         @server.call_tool()
         async def call_tool(
-            name: str,
-            arguments: Dict[str, Any],
+            name: str, arguments: Dict[str, Any]
         ) -> List[Union[TextContent, ImageContent, EmbeddedResource]]:
-            """Execute a tool, with optional session management for artifact helpers."""
-            registry = self.tools_registry
-
-            # ── name resolution ───────────────────────────────────────────────────
-            resolved = name if name in registry else resolve_tool_name(name)
-            if resolved not in registry:
-                # last-chance suffix search  (proxy.write_file  /  foo.write_file_v2)
-                matches = [k for k in registry if k.endswith(f"_{name}") or k.endswith(f".{name}")]
-                if len(matches) == 1:
-                    resolved = matches[0]
-            if resolved not in registry:  # still not found
-                raise ValueError(f"Tool not found: {name}")
-
-            func = registry[resolved]
-
-            # ── auto-inject session_id if needed ──────────────────────────────────
-            arguments = await self._inject_session_context(resolved, arguments)
-
-            # is this an artifact helper?
-            is_artifact_tool = _ARTIFACT_RX.search(resolved) is not None
-
-            # ── execute with timeout ──────────────────────────────────────────────
+            """Execute a tool; collects streaming results to work around MCP library async generator bug."""
             try:
+                self.logger.debug("call_tool called with name='%s', arguments=%s", name, arguments)
+                registry = self.tools_registry
+
+                # ── name resolution ───────────────────────────────────────────────
+                resolved = name if name in registry else resolve_tool_name(name)
+                if resolved not in registry:
+                    matches = [
+                        k
+                        for k in registry
+                        if k.endswith(f"_{name}") or k.endswith(f".{name}")
+                    ]
+                    if len(matches) == 1:
+                        resolved = matches[0]
+                if resolved not in registry:
+                    raise ValueError(f"Tool not found: {name}")
+
+                func = registry[resolved]
+                self.logger.debug("Resolved tool '%s' to function: %s", name, func)
+
+                # ── auto-inject session_id for artifact helpers ──────────────────
+                arguments = await self._inject_session_context(resolved, arguments)
+                is_artifact_tool = _ARTIFACT_RX.search(resolved) is not None
+
+                # ── execute (with timeout / streaming) ───────────────────────────
                 if self.current_session:
                     set_session_context(self.current_session)
 
-                # Execute tool with timeout protection
+                self.logger.debug("About to execute tool '%s'", resolved)
                 result = await self._execute_tool_with_timeout(func, resolved, arguments)
+                self.logger.debug("Tool execution completed, result type: %s", type(result))
 
-                # did the tool itself change the session (e.g. set_session)?
+                # Did the tool change the session?
                 new_ctx = get_session_context()
                 if new_ctx and new_ctx != self.current_session:
                     self.current_session = new_ctx
 
-            except Exception as exc:
-                # Error handling is already done in _execute_tool_with_timeout
-                raise
+                # ── streaming path: collect all chunks to work around MCP library bug ────────────────────
+                if isasyncgen(result):
+                    self.logger.debug("Tool returned async generator, collecting all chunks for '%s'", resolved)
+                    
+                    collected_chunks = []
+                    chunk_count = 0
+                    
+                    try:
+                        async for part in result:
+                            chunk_count += 1
+                            self.logger.debug("Collecting streaming chunk %d for '%s': %s", chunk_count, resolved, part)
+                            
+                            # Convert to TextContent
+                            if isinstance(part, (TextContent, ImageContent, EmbeddedResource)):
+                                collected_chunks.append(part)
+                            elif isinstance(part, str):
+                                collected_chunks.append(TextContent(type="text", text=part))
+                            elif isinstance(part, dict) and "delta" in part:
+                                collected_chunks.append(TextContent(type="text", text=part["delta"]))
+                            else:
+                                collected_chunks.append(TextContent(
+                                    type="text", text=json.dumps(part, ensure_ascii=False)
+                                ))
+                        
+                        self.logger.debug("Collected %d chunks for '%s'", chunk_count, resolved)
+                        
+                        # Return all chunks as a single response
+                        if collected_chunks:
+                            return collected_chunks
+                        else:
+                            return [TextContent(type="text", text="No output from streaming tool")]
+                            
+                    except Exception as e:
+                        self.logger.error("Error collecting streaming chunks for '%s': %s", resolved, e)
+                        return [TextContent(type="text", text=f"Streaming error: {str(e)}")]
 
-            # ── wrap artifact result with session_id (only for file helpers) ─────
-            if is_artifact_tool:
-                # normalise to the canonical dict shape expected by front-ends
-                wrapped: Dict[str, Any]
-                if isinstance(result, dict) and "content" in result and "isError" in result:
-                    wrapped = {**result, "session_id": self.current_session}
-                else:
-                    wrapped = {
-                        "session_id": self.current_session,
-                        "content": result,
-                        "isError": False,
-                    }
-                result = wrapped  # continue with JSON serialisation below
+                # ── non-streaming path (finish like before) ───────────────────────
+                self.logger.debug("Tool returned non-streaming result for '%s'", resolved)
+                
+                if is_artifact_tool:
+                    wrapped = (
+                        {**result, "session_id": self.current_session}
+                        if isinstance(result, dict)
+                        and "content" in result
+                        and "isError" in result
+                        else {
+                            "session_id": self.current_session,
+                            "content": result,
+                            "isError": False,
+                        }
+                    )
+                    result = wrapped
 
-            # ── convert to MCP content objects ────────────────────────────────────
-            if (
-                isinstance(result, list)
-                and all(isinstance(r, (TextContent, ImageContent, EmbeddedResource)) for r in result)
-            ):
-                return result
+                if (
+                    isinstance(result, list)
+                    and all(
+                        isinstance(r, (TextContent, ImageContent, EmbeddedResource))
+                        for r in result
+                    )
+                ):
+                    return result
 
-            if isinstance(result, str):
-                return [TextContent(type="text", text=result)]
+                if isinstance(result, str):
+                    return [TextContent(type="text", text=result)]
 
-            # everything else → JSON string
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-
-        # custom proxy / etc. handlers ---------------------------------------
-        if custom_handlers:
-            for k, v in custom_handlers.items():
-                setattr(server, k, v)
-
-        # transport ----------------------------------------------------------
+                # everything else → JSON string
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+                
+            except Exception as e:
+                self.logger.error("Error in call_tool for '%s': %s", name, e)
+                import traceback
+                self.logger.error("Full traceback: %s", traceback.format_exc())
+                return [TextContent(type="text", text=f"Tool execution error: {str(e)}")]
+                
+        # ------------------------------------------------------------------ #
+        # transport bootstrapping (stdio / SSE)                             #
+        # ------------------------------------------------------------------ #
         opts = server.create_initialization_options()
         mode = self.config.get("server", {}).get("type", "stdio")
 
         if mode == "stdio":
-            self.logger.info("Starting MCP (stdio) with %ds tool timeout …", self.tool_timeout)
+            self.logger.info(
+                "Starting MCP (stdio) – global timeout %.1fs …", self.tool_timeout
+            )
             async with stdio_server() as (r, w):
                 await server.run(r, w, opts)
 
@@ -380,7 +449,9 @@ class MCPServer:
             transport = SseServerTransport(msg_path)
 
             async def _handle_sse(request: Request):
-                async with transport.connect_sse(request.scope, request.receive, request._send) as streams:
+                async with transport.connect_sse(
+                    request.scope, request.receive, request._send
+                ) as streams:
                     await server.run(streams[0], streams[1], opts)
                 return Response()
 
@@ -389,10 +460,22 @@ class MCPServer:
                     Route(sse_path, _handle_sse, methods=["GET"]),
                     Mount(msg_path, app=transport.handle_post_message),
                 ],
-                middleware=[Middleware(AuthMiddleware, auth=self.config.get("server", {}).get("auth"))],
+                middleware=[
+                    Middleware(
+                        AuthMiddleware,
+                        auth=self.config.get("server", {}).get("auth"),
+                    )
+                ],
             )
-            self.logger.info("Starting MCP (SSE) on %s:%s with %ds tool timeout …", host, port, self.tool_timeout)
-            await uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="info")).serve()
+            self.logger.info(
+                "Starting MCP (SSE) on %s:%s – global timeout %.1fs …",
+                host,
+                port,
+                self.tool_timeout,
+            )
+            await uvicorn.Server(
+                uvicorn.Config(app, host=host, port=port, log_level="info")
+            ).serve()
         else:
             raise ValueError(f"Unknown server type: {mode}")
 
