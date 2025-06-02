@@ -631,71 +631,57 @@ TOOL_FUNCTIONS = {
 # ============================================================================
 
 async def register_artifacts_tools(config: Dict[str, Any] | None = None) -> bool:
-    """
-    Register artifact helpers according to *config*.
-
-    * If chuk_artifacts is unavailable **or** the YAML block is absent /
-      disabled, every artifact helper is stripped from ``TOOLS_REGISTRY``.
-    * Otherwise, only helpers whose own ``enabled: true`` flag is set in
-      `artifacts.tools` are kept.
-
-    Returns
-    -------
-    bool
-        ``True`` iff at least one helper is registered.
-    """
-    # Fast exit if chuk_artifacts missing
+    """Register artifact helpers according to *config*."""
+    # 0) chuk_artifacts available?
     if not CHUK_ARTIFACTS_AVAILABLE:
         for t in TOOL_FUNCTIONS:
             TOOLS_REGISTRY.pop(t, None)
-        logger.info("chuk_artifacts not installed – artifact helpers disabled")
+        logger.info("chuk_artifacts missing – helpers disabled")
         return False
 
     art_cfg = (config or {}).get("artifacts", {})
     if not art_cfg.get("enabled", False):
-        # remove everything and bail out
         for t in TOOL_FUNCTIONS:
             TOOLS_REGISTRY.pop(t, None)
         logger.info("artifacts block disabled – no helpers registered")
         return False
 
     enabled_helpers = {
-        name
-        for name, tc in art_cfg.get("tools", {}).items()
-        if tc.get("enabled", False)
+        n for n, tc in art_cfg.get("tools", {}).items() if tc.get("enabled", False)
     }
     if not enabled_helpers:
         for t in TOOL_FUNCTIONS:
             TOOLS_REGISTRY.pop(t, None)
-        logger.info("artifacts block present but all helpers disabled")
+        logger.info("all artifact helpers disabled individually")
         return False
 
-    # Ensure the global artifact-store is initialised (raises if mis-configured)
-    store = await get_artifact_store()
-    logger.debug("Artifact store initialised: %s", store)
+    # 1) make sure store is OK
+    await get_artifact_store()          # raises if mis-configured
 
-    # Prune every previous placeholder
+    # 2) prune everything that might still be there
     for t in TOOL_FUNCTIONS:
         TOOLS_REGISTRY.pop(t, None)
 
-    # Register only the enabled helpers
+    # ---- KEEP _enabled_tools IN-SYNC ---------------------------------
+    _enabled_tools.clear()
+    _enabled_tools.update(enabled_helpers)
+    # ------------------------------------------------------------------
+
+    # 3) register the wanted helpers
     registered = 0
     for name in enabled_helpers:
         fn = TOOL_FUNCTIONS[name]
-        # If still a placeholder, force initialisation
         if getattr(fn, "_needs_init", False):
             from chuk_mcp_runtime.common.mcp_tool_decorator import _initialize_tool
             await _initialize_tool(name, fn)
             fn = TOOLS_REGISTRY.get(name, fn)
-
         TOOLS_REGISTRY[name] = fn
         registered += 1
         logger.debug("Registered artifact helper: %s", name)
 
     logger.info(
         "Registered %d artifact helper(s): %s",
-        registered,
-        ", ".join(sorted(enabled_helpers)),
+        registered, ", ".join(sorted(enabled_helpers)),
     )
     return bool(registered)
 
