@@ -1,15 +1,14 @@
-# chuk_mcp_runtime/common/mcp_tool_decorator.py
+# Enhanced chuk_mcp_runtime/common/mcp_tool_decorator.py
 """
-CHUK MCP Tool Decorator Module - Async Native Implementation
+CHUK MCP Tool Decorator Module - Enhanced with Per-Tool Timeout Support
 
 This module provides decorators for registering functions as CHUK MCP tools
-with automatic input schema generation based on function signatures.
-All functions are async native with no sync fallbacks.
+with automatic input schema generation and configurable timeouts.
 """
 import inspect
 import importlib
 from functools import wraps
-from typing import Any, Callable, Dict, Type, TypeVar, get_type_hints, Optional, List
+from typing import Any, Callable, Dict, Type, TypeVar, get_type_hints, Optional, List, Union
 import logging
 
 T = TypeVar("T")
@@ -188,10 +187,19 @@ async def create_input_schema(func: Callable[..., Any]) -> Dict[str, Any]:
         return {"type": "object", "properties": props, "required": required}
 
 
-def mcp_tool(name: str = None, description: str = None):
+def mcp_tool(
+    name: str = None, 
+    description: str = None, 
+    timeout: Optional[Union[int, float]] = None
+):
     """
-    Decorator to register an async tool.
+    Decorator to register an async tool with optional timeout configuration.
     Only works with async functions - no synchronous functions allowed.
+    
+    Args:
+        name: Tool name (defaults to function name)
+        description: Tool description (defaults to docstring)
+        timeout: Tool-specific timeout in seconds (overrides global timeout)
     """
     def decorator(original_func: Callable[..., Any]):
         # Ensure function is async
@@ -212,6 +220,7 @@ def mcp_tool(name: str = None, description: str = None):
         wrapper._init_name = tool_name
         wrapper._init_desc = tool_desc
         wrapper._orig_func = original_func
+        wrapper._tool_timeout = timeout  # Store tool-specific timeout
         
         # Register immediately
         TOOLS_REGISTRY[tool_name] = wrapper
@@ -257,9 +266,29 @@ async def _initialize_tool(tool_name: str, placeholder: Callable):
     wrapper._mcp_tool = tool
     wrapper._needs_init = False
     wrapper._orig_func = original_func
+    wrapper._tool_timeout = getattr(placeholder, '_tool_timeout', None)  # Preserve timeout
     
     # Replace in registry
     TOOLS_REGISTRY[tool_name] = wrapper
+
+def get_tool_timeout(tool_name: str, default_timeout: float = 60.0) -> float:
+    """
+    Get the timeout for a specific tool.
+    
+    Args:
+        tool_name: Name of the tool
+        default_timeout: Default timeout if no tool-specific timeout is set
+        
+    Returns:
+        Timeout in seconds
+    """
+    if tool_name in TOOLS_REGISTRY:
+        func = TOOLS_REGISTRY[tool_name]
+        tool_timeout = getattr(func, '_tool_timeout', None)
+        if tool_timeout is not None:
+            return float(tool_timeout)
+    
+    return default_timeout
 
 async def execute_tool(tool_name: str, **kwargs) -> Any:
     """
@@ -314,21 +343,29 @@ async def get_tool_metadata(tool_name: Optional[str] = None) -> Dict[str, Any]:
             raise KeyError(f"Tool '{tool_name}' not registered")
         func = TOOLS_REGISTRY[tool_name]
         if hasattr(func, '_mcp_tool'):
-            return {
+            metadata = {
                 "name": func._mcp_tool.name,
                 "description": func._mcp_tool.description,
                 "inputSchema": func._mcp_tool.inputSchema
             }
+            # Add timeout info if available
+            if hasattr(func, '_tool_timeout') and func._tool_timeout is not None:
+                metadata["timeout"] = func._tool_timeout
+            return metadata
         return {}
     
     # Return metadata for all tools
     result = {}
     for name, func in TOOLS_REGISTRY.items():
         if hasattr(func, '_mcp_tool'):
-            result[name] = {
+            metadata = {
                 "name": func._mcp_tool.name,
                 "description": func._mcp_tool.description,
                 "inputSchema": func._mcp_tool.inputSchema
             }
+            # Add timeout info if available
+            if hasattr(func, '_tool_timeout') and func._tool_timeout is not None:
+                metadata["timeout"] = func._tool_timeout
+            result[name] = metadata
     
     return result

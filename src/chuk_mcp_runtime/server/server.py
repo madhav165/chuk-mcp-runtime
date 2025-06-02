@@ -7,6 +7,7 @@ Core MCP server with
 * automatic session-ID injection for artifact tools
 * optional bearer-token auth middleware
 * transparent chuk_artifacts integration
+* timeout support for long-running tools
 """
 
 from __future__ import annotations
@@ -130,7 +131,31 @@ class MCPServer:
         self.current_session: Optional[str] = None
         self.artifact_store: Optional[ArtifactStore] = None
 
+        # Tool timeout configuration
+        self.tool_timeout = self._get_tool_timeout()
+        self.logger.info(f"Tool timeout configured: {self.tool_timeout}s")
+
         update_naming_maps()  # make sure resolve_tool_name works
+
+    def _get_tool_timeout(self) -> float:
+        """Get tool timeout from configuration or environment."""
+        # Priority: config.tools.timeout > config.tool_timeout > env vars > default
+        timeout_sources = [
+            self.config.get("tools", {}).get("timeout"),
+            self.config.get("tool_timeout"),
+            os.getenv("MCP_TOOL_TIMEOUT"),
+            os.getenv("TOOL_TIMEOUT"),
+            60.0  # default timeout
+        ]
+        
+        for timeout in timeout_sources:
+            if timeout is not None:
+                try:
+                    return float(timeout)
+                except (ValueError, TypeError):
+                    continue
+        
+        return 60.0
 
     async def _setup_artifact_store(self) -> None:
         if not CHUK_ARTIFACTS_AVAILABLE:
@@ -198,6 +223,41 @@ class MCPServer:
             args = {**args, "session_id": self.current_session}
         return args
 
+    # ------------------------------------------------------------------ #
+    # Tool execution with timeout                                        #
+    # ------------------------------------------------------------------ #
+    async def _execute_tool_with_timeout(
+        self, 
+        func: Callable, 
+        tool_name: str, 
+        arguments: Dict[str, Any]
+    ) -> Any:
+        """Execute a tool with timeout protection."""
+        start_time = time.time()
+        
+        try:
+            self.logger.debug(f"Executing tool '{tool_name}' with {self.tool_timeout}s timeout")
+            
+            # Execute with timeout
+            result = await asyncio.wait_for(
+                func(**arguments),
+                timeout=self.tool_timeout
+            )
+            
+            execution_time = time.time() - start_time
+            self.logger.info(f"Tool '{tool_name}' completed in {execution_time:.2f}s")
+            return result
+            
+        except asyncio.TimeoutError:
+            execution_time = time.time() - start_time
+            error_msg = f"Tool '{tool_name}' timed out after {execution_time:.2f}s (limit: {self.tool_timeout}s)"
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)
+            
+        except Exception as exc:
+            execution_time = time.time() - start_time
+            self.logger.error(f"Tool '{tool_name}' failed after {execution_time:.2f}s: {exc}", exc_info=True)
+            raise ValueError(str(exc)) from exc
 
     # ------------------------------------------------------------------ #
     # Public API                                                         #
@@ -228,7 +288,6 @@ class MCPServer:
 
         # ----------------------------- call_tool ----------------------------- #
 
-        # make sure _ARTIFACT_RX is imported / defined in the module
         @server.call_tool()
         async def call_tool(
             name: str,
@@ -255,12 +314,13 @@ class MCPServer:
             # is this an artifact helper?
             is_artifact_tool = _ARTIFACT_RX.search(resolved) is not None
 
-            # ── execute ───────────────────────────────────────────────────────────
+            # ── execute with timeout ──────────────────────────────────────────────
             try:
                 if self.current_session:
                     set_session_context(self.current_session)
 
-                result = await func(**arguments)
+                # Execute tool with timeout protection
+                result = await self._execute_tool_with_timeout(func, resolved, arguments)
 
                 # did the tool itself change the session (e.g. set_session)?
                 new_ctx = get_session_context()
@@ -268,9 +328,8 @@ class MCPServer:
                     self.current_session = new_ctx
 
             except Exception as exc:
-                self.logger.error("Tool '%s' failed: %s", resolved, exc, exc_info=True)
-                # ⚠️  convert every tooling error to ValueError for callers/tests
-                raise ValueError(str(exc)) from exc
+                # Error handling is already done in _execute_tool_with_timeout
+                raise
 
             # ── wrap artifact result with session_id (only for file helpers) ─────
             if is_artifact_tool:
@@ -310,7 +369,7 @@ class MCPServer:
         mode = self.config.get("server", {}).get("type", "stdio")
 
         if mode == "stdio":
-            self.logger.info("Starting MCP (stdio) …")
+            self.logger.info("Starting MCP (stdio) with %ds tool timeout …", self.tool_timeout)
             async with stdio_server() as (r, w):
                 await server.run(r, w, opts)
 
@@ -332,7 +391,7 @@ class MCPServer:
                 ],
                 middleware=[Middleware(AuthMiddleware, auth=self.config.get("server", {}).get("auth"))],
             )
-            self.logger.info("Starting MCP (SSE) on %s:%s …", host, port)
+            self.logger.info("Starting MCP (SSE) on %s:%s with %ds tool timeout …", host, port, self.tool_timeout)
             await uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="info")).serve()
         else:
             raise ValueError(f"Unknown server type: {mode}")
