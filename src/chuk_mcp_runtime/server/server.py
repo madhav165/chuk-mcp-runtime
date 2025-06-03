@@ -7,6 +7,7 @@ CHUK MCP Server
 * transparent chuk_artifacts integration
 * global **and per-tool** timeout support
 * end-to-end **token streaming** for async-generator tools
+* JSON concatenation fixing for tool parameters
 """
 
 from __future__ import annotations
@@ -64,9 +65,69 @@ except ImportError:  # pragma: no cover
     ArtifactStore = None  # type: ignore
 
 # ------------------------------------------------------------------------------
-# Authentication middleware
+# JSON Concatenation Fix Utilities
 # ------------------------------------------------------------------------------
 
+def parse_tool_arguments(arguments: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Parse tool arguments, handling concatenated JSON strings.
+    
+    Handles cases like: {"text":"hello"}{"delay":0.5} -> {"text":"hello", "delay":0.5}
+    """
+    # If it's already a dict, return as-is (most common case)
+    if isinstance(arguments, dict):
+        return arguments
+    
+    # If it's None or empty, return empty dict
+    if not arguments:
+        return {}
+    
+    # Handle string arguments (where concatenation might occur)
+    if isinstance(arguments, str):
+        # First, try to parse as normal JSON
+        try:
+            parsed = json.loads(arguments)
+            # If successful and it's a dict, return it
+            if isinstance(parsed, dict):
+                return parsed
+            # If it's not a dict, wrap it
+            return {"value": parsed}
+        except json.JSONDecodeError:
+            pass
+        
+        # If normal parsing failed, try to fix concatenated JSON
+        if '}' in arguments and '{' in arguments:
+            # Pattern to find }{ concatenations (with optional whitespace)
+            pattern = r'\}\s*\{'
+            if re.search(pattern, arguments):
+                # Replace }{ with },{ to make it a valid JSON array
+                array_str = '[' + re.sub(pattern, '},{', arguments) + ']'
+                try:
+                    # Parse as array of objects
+                    objects = json.loads(array_str)
+                    
+                    # Merge all objects into one
+                    merged = {}
+                    for obj in objects:
+                        if isinstance(obj, dict):
+                            merged.update(obj)
+                        else:
+                            # If non-dict object in array, add with index
+                            merged[f"value_{len(merged)}"] = obj
+                    
+                    return merged
+                except json.JSONDecodeError:
+                    # If parsing the array fails, fall through to string handling
+                    pass
+        
+        # If all JSON parsing fails, treat as plain string
+        return {"text": arguments}
+    
+    # For any other type, convert to string and wrap
+    return {"value": str(arguments)}
+# ------------------------------------------------------------------------------
+# Authentication middleware
+# ------------------------------------------------------------------------------
 
 class AuthMiddleware(BaseHTTPMiddleware):
     """Simple bearer-token / cookie-based auth."""
@@ -304,21 +365,58 @@ class MCPServer:
 
         @server.list_tools()
         async def list_tools() -> List[Tool]:
-            self.logger.info("list_tools called – %d tools total", len(self.tools_registry))
-            return [
-                func._mcp_tool
-                for func in self.tools_registry.values()
-                if hasattr(func, "_mcp_tool")
-            ]
+            """List available tools with robust error handling."""
+            try:
+                self.logger.info("list_tools called – %d tools total", len(self.tools_registry))
+                
+                tools = []
+                for tool_name, func in self.tools_registry.items():
+                    try:
+                        if hasattr(func, "_mcp_tool"):
+                            tool_obj = func._mcp_tool
+                            
+                            # Verify the tool object is valid
+                            if hasattr(tool_obj, 'name') and hasattr(tool_obj, 'description'):
+                                tools.append(tool_obj)
+                                self.logger.debug("Added tool to list: %s", tool_obj.name)
+                            else:
+                                self.logger.warning("Tool %s has invalid _mcp_tool object: %s", 
+                                                tool_name, tool_obj)
+                        else:
+                            self.logger.warning("Tool %s missing _mcp_tool attribute", tool_name)
+                            
+                    except Exception as e:
+                        self.logger.error("Error processing tool %s: %s", tool_name, e)
+                        continue
+                
+                self.logger.info("Returning %d valid tools", len(tools))
+                return tools
+                
+            except Exception as e:
+                self.logger.error("Error in list_tools: %s", e)
+                import traceback
+                self.logger.error("Full traceback: %s", traceback.format_exc())
+                # Return empty list rather than crashing
+                return []
 
         # ----------------------------- call_tool ----------------------------- #
-        # Replace your existing @server.call_tool() method with this version
         @server.call_tool()
         async def call_tool(
             name: str, arguments: Dict[str, Any]
         ) -> List[Union[TextContent, ImageContent, EmbeddedResource]]:
-            """Execute a tool; collects streaming results to work around MCP library async generator bug."""
+            """Execute a tool with JSON concatenation fixing and streaming workaround."""
             try:
+                # Fix concatenated JSON in arguments FIRST
+                original_args = arguments
+                if arguments:
+                    if isinstance(arguments, (str, dict)):
+                        arguments = parse_tool_arguments(arguments)
+                        
+                        # Log if we had to fix anything
+                        if arguments != original_args:
+                            self.logger.info("Fixed concatenated JSON arguments for '%s': %s -> %s", 
+                                           name, original_args, arguments)
+
                 self.logger.debug("call_tool called with name='%s', arguments=%s", name, arguments)
                 registry = self.tools_registry
 
