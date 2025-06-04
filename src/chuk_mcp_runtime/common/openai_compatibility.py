@@ -38,19 +38,25 @@ async def _build_wrapper_from_schema(*, alias_name: str, target: Callable, schem
     props = schema.get("properties", {})
     required = set(schema.get("required", []))
 
-    arg_parts: List[str] = []
+    # FIXED: Separate required and optional parameters to avoid syntax error
+    required_args: List[str] = []
+    optional_args: List[str] = []
     kw_map: List[str] = []
+    
     for pname in props:
-        if pname in required:
-            arg_parts.append(pname)
-        else:
-            arg_parts.append(f"{pname}=None")
         kw_map.append(f"'{pname}': {pname}")
+        
+        if pname in required:
+            required_args.append(pname)          # No default value
+        else:
+            optional_args.append(f"{pname}=None") # With default value
 
-    # hidden target param goes LAST so default binding is valid
-    arg_sig = ", ".join(arg_parts)
-    if arg_sig:
-        arg_sig += ", __target=__default_target"
+    # FIXED: Build signature with ALL required params first, then ALL optional params
+    all_args = required_args + optional_args
+    
+    # Add the hidden target param at the end
+    if all_args:
+        arg_sig = ", ".join(all_args) + ", __target=__default_target"
     else:
         arg_sig = "__target=__default_target"
 
@@ -62,6 +68,7 @@ async def _alias({arg_sig}):
     kwargs = {{k: v for k, v in kwargs.items() if v is not None}}
     return await __target(**kwargs)
 """
+    
     loc: Dict[str, Any] = {"__default_target": target}
     exec(src, loc)
     fn = loc["_alias"]

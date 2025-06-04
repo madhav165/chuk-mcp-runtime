@@ -7,6 +7,40 @@ server:
   type: "stdio"
   #auth: "bearer" # this line is needed to enable bearer auth
 
+# Logging configuration - ADD THIS SECTION
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  reset_handlers: true
+  quiet_libraries: true
+  
+  # Suppress noisy debug loggers
+  loggers:
+    "chuk_mcp_runtime.proxy": "WARNING"
+    "chuk_mcp_runtime.proxy.manager": "WARNING" 
+    "chuk_mcp_runtime.proxy.tool_wrapper": "WARNING"
+    "chuk_tool_processor.mcp.stream_manager": "WARNING"
+    "chuk_tool_processor.mcp.register": "WARNING"
+    "chuk_tool_processor.mcp.setup_stdio": "WARNING"
+
+# Logging configuration - this section controls all logging behavior
+logging:
+  level: "INFO"  # Global log level
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  reset_handlers: true
+  quiet_libraries: true
+  
+  # Specific logger overrides to silence noisy components
+  loggers:
+    "chuk_mcp_runtime.proxy": "WARNING"
+    "chuk_mcp_runtime.proxy.manager": "WARNING" 
+    "chuk_mcp_runtime.proxy.tool_wrapper": "WARNING"
+    "chuk_tool_processor.mcp.stream_manager": "WARNING"
+    "chuk_tool_processor.mcp.register": "WARNING"
+    "chuk_tool_processor.mcp.setup_stdio": "WARNING"
+    "chuk_mcp_runtime.common.tool_naming": "WARNING"
+    "chuk_mcp_runtime.common.openai_compatibility": "WARNING"
+
 # optional overrides
 sse:
   host: "0.0.0.0"
@@ -20,6 +54,15 @@ proxy:
   enabled: false
   namespace: "proxy"
   openai_compatible: false   # ← set to true if you want underscores
+
+# Add GitHub server configuration here when you want to enable it
+# mcp_servers:
+#   github:
+#     enabled: true
+#     type: "stdio"
+#     command: "npx"
+#     args: ["@modelcontextprotocol/server-github"]
+#     location: ""
 
 # mcp_servers:
 #   time:

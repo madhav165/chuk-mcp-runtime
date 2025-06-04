@@ -1,9 +1,8 @@
-# chuk_mcp_runtime/server/logging_config.py
 """
-Logging configuration module for CHUK MCP servers.
+Enhanced logging configuration module for CHUK MCP servers.
 
 This module sets up a shared logger with configurable logging levels,
-formats, and output handlers based on configuration.
+formats, and per-logger overrides based on configuration.
 """
 import os
 import sys
@@ -54,6 +53,16 @@ def configure_logging(config: Dict[str, Any] = None) -> None:
     
     # Quiet the specific library logging for mcp.server.lowlevel.server
     logging.getLogger("mcp.server.lowlevel.server").setLevel(logging.WARNING)
+    
+    # NEW: Configure specific loggers from config
+    logger_overrides = log_config.get("loggers", {})
+    for logger_name, level_name in logger_overrides.items():
+        try:
+            level = getattr(logging, level_name.upper(), logging.WARNING)
+            logging.getLogger(logger_name).setLevel(level)
+        except AttributeError:
+            # Invalid log level name, skip
+            continue
 
 def get_logger(name: str = None, config: Dict[str, Any] = None) -> Logger:
     """

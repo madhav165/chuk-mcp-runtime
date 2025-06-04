@@ -58,8 +58,6 @@ class ProxyServerManager:
 
         self.project_root = project_root
         self.mcp_servers = cfg.get("mcp_servers", {})
-
-        logger.setLevel(logging.DEBUG)
         logger.debug("Proxy init-openai_mode=%s", self.openai_mode)
 
         self.stream_manager = None
