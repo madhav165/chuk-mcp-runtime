@@ -47,6 +47,7 @@ sse:
   port: 8000
   sse_path: "/sse"
   message_path: "/messages/"
+  health_path: "/health"
   log_level: "info"
   access_log: true
 
