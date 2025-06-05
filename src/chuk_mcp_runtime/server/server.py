@@ -543,7 +543,7 @@ class MCPServer:
         elif mode == "sse":
             cfg = self.config.get("sse", {})
             host, port = cfg.get("host", "0.0.0.0"), cfg.get("port", 8000)
-            sse_path, msg_path = cfg.get("sse_path", "/sse"), cfg.get("message_path", "/messages/")
+            sse_path, msg_path, health_path = cfg.get("sse_path", "/sse"), cfg.get("message_path", "/messages/"), cfg.get("health_path", "/health")
             transport = SseServerTransport(msg_path)
 
             async def _handle_sse(request: Request):
@@ -560,7 +560,7 @@ class MCPServer:
                 routes=[
                     Route(sse_path, _handle_sse, methods=["GET"]),
                     Mount(msg_path, app=transport.handle_post_message),
-                    Route("/health", health, methods=["GET"]),
+                    Route(health_path, health, methods=["GET"]),
                 ],
                 middleware=[
                     Middleware(
