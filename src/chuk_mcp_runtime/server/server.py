@@ -37,7 +37,7 @@ from starlette.exceptions import HTTPException
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, PlainTextResponse
 from starlette.routing import Mount, Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -552,11 +552,15 @@ class MCPServer:
                 ) as streams:
                     await server.run(streams[0], streams[1], opts)
                 return Response()
+            
+            async def health(request):
+                return PlainTextResponse("OK")
 
             app = Starlette(
                 routes=[
                     Route(sse_path, _handle_sse, methods=["GET"]),
                     Mount(msg_path, app=transport.handle_post_message),
+                    Route("/health", health, methods=["GET"]),
                 ],
                 middleware=[
                     Middleware(
