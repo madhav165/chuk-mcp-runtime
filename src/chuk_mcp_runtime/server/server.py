@@ -125,10 +125,11 @@ def parse_tool_arguments(arguments: Union[str, Dict[str, Any]]) -> Dict[str, Any
     
     # For any other type, convert to string and wrap
     return {"value": str(arguments)}
+
+
 # ------------------------------------------------------------------------------
 # Authentication middleware
 # ------------------------------------------------------------------------------
-
 class AuthMiddleware(BaseHTTPMiddleware):
     """Simple bearer-token / cookie-based auth."""
 
@@ -139,6 +140,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: Callable[[Request], Response]
     ) -> Response:
+        if request.url.path == "/health" and request.method == "GET":
+            return await call_next(request)
+    
         if self.auth != "bearer":
             return await call_next(request)
 
