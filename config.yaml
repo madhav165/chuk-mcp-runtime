@@ -4,7 +4,7 @@ host:
   log_level: "INFO"
 
 server:
-  type: "stdio"
+  type: "stdio"   # "stdio" or "sse" or "streamable-http"
   #auth: "bearer" # this line is needed to enable bearer auth
 
 # Logging configuration - ADD THIS SECTION
@@ -47,6 +47,16 @@ sse:
   port: 8000
   sse_path: "/sse"
   message_path: "/messages/"
+  health_path: "/health"
+  log_level: "info"
+  access_log: true
+
+streamable-http:
+  host: "0.0.0.0"
+  port: 8000
+  mcp_path: "/mcp"
+  stateless: true
+  json_response: true
   health_path: "/health"
   log_level: "info"
   access_log: true

@@ -24,11 +24,13 @@ from inspect import (
     isasyncgenfunction,   # <-- NEW
     isasyncgen,          # <-- NEW
 )
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union, AsyncIterator
 
 import uvicorn
+import contextlib
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.stdio import stdio_server
 from mcp.types import EmbeddedResource, ImageContent, TextContent, Tool
 from starlette.applications import Starlette
@@ -48,6 +50,7 @@ from chuk_mcp_runtime.common.mcp_tool_decorator import (
 from chuk_mcp_runtime.common.tool_naming import resolve_tool_name, update_naming_maps
 from chuk_mcp_runtime.common.verify_credentials import validate_token
 from chuk_mcp_runtime.server.logging_config import get_logger
+from chuk_mcp_runtime.server.event_store import InMemoryEventStore
 from chuk_mcp_runtime.session.session_management import (
     SessionError,
     clear_session_context,
@@ -578,8 +581,75 @@ class MCPServer:
             await uvicorn.Server(
                 uvicorn.Config(app, host=host, port=port, log_level="info")
             ).serve()
+
+        elif mode == "streamable-http":
+            self.logger.info("Starting MCP server over streamable-http")
+
+            # Get streamable-http server configuration
+            streamhttp_config = self.config.get("streamable-http", {})
+            host = streamhttp_config.get("host", "127.0.0.1")
+            port = streamhttp_config.get("port", 3000)
+            mcp_path = streamhttp_config.get("mcp_path", "/mcp")
+            json_response = streamhttp_config.get("json_response", True)
+            stateless = streamhttp_config.get("stateless", True)
+
+            if stateless:
+                event_store=None
+            else:
+                event_store = InMemoryEventStore()
+            # Create the session manager with our app and event store
+            session_manager = StreamableHTTPSessionManager(
+                app=server,
+                event_store=event_store,  # Enable resumability
+                stateless=stateless,
+                json_response=json_response,
+            )
+            async def handle_streamable_http(scope: Scope, receive: Receive, send: Send) -> Response:
+                await session_manager.handle_request(scope, receive, send)
+                return Response()
+
+            async def health(request: Request) -> PlainTextResponse:
+                return PlainTextResponse("OK")
+
+            @contextlib.asynccontextmanager
+            async def lifespan(app: Starlette) -> AsyncIterator[None]:
+                async with session_manager.run():
+                    self.logger.info("Application started with StreamableHTTP session manager!")
+                    try:
+                        yield
+                    finally:
+                        self.logger.info("Application shutting down...")
+
+            app = Starlette(
+                debug=True,
+                routes=[
+                    Mount(mcp_path, handle_streamable_http),
+                    Route("/health", health, methods=["GET"]),
+                ],
+                middleware=[
+                    Middleware(
+                        AuthMiddleware,
+                        auth=self.config.get("server", {}).get("auth"),
+                    )
+                ],
+                lifespan=lifespan,
+            )
+
+            import uvicorn
+
+            self.logger.info(
+                "Starting MCP (StreamableHTTP) on %s:%s – global timeout %.1fs …",
+                host,
+                port,
+                self.tool_timeout,
+            )
+            await uvicorn.Server(
+                uvicorn.Config(app, host=host, port=port, log_level="info")
+            ).serve()
         else:
             raise ValueError(f"Unknown server type: {mode}")
+
+        
 
     # ------------------------------------------------------------------ #
     # Misc administrative helpers                                        #
