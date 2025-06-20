@@ -349,7 +349,7 @@ wheels = [
 
 [[package]]
 name = "chuk-mcp-runtime"
-version = "0.4"
+version = "0.5.1"
 source = { editable = "." }
 dependencies = [
     { name = "chuk-artifacts" },
@@ -357,6 +357,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pyjwt" },
     { name = "pyyaml" },
+    { name = "uvicorn" },
 ]
 
 [package.optional-dependencies]
@@ -382,6 +383,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.26.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.6" },
+    { name = "uvicorn", specifier = ">=0.34.0" },
 ]
 
 [package.metadata.requires-dev]
