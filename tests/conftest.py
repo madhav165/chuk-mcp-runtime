@@ -1,7 +1,11 @@
-# tests/conftest.py
+# tests/conftest.py - Final Fixed Version
+"""
+Enhanced conftest.py with properly working mocks for all components.
+"""
+
 # Mock imports need to happen before ANY imports
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, AsyncMock
 from contextvars import ContextVar
 
 # Create mocks for all the modules we need before they get imported
@@ -13,7 +17,6 @@ mock_modules = {
     "chuk_tool_processor.models.tool_call": MagicMock(),
     "chuk_sessions": MagicMock(),
     "chuk_sessions.provider_factory": MagicMock(),
-    "chuk_artifacts": MagicMock()
 }
 
 # Add them to sys.modules
@@ -24,52 +27,28 @@ for mod_name, mock in mock_modules.items():
 mock_session_ctx = ContextVar("session_context", default=None)
 mock_user_ctx = ContextVar("user_context", default=None)
 
-# Mock the ProxyServerManager class to avoid import errors
-class MockProxyServerManager:
-    """Mock implementation of ProxyServerManager for testing."""
-    def __init__(self, config, project_root):
-        self.running_servers = {}
-        self.running = {}  # Add this for compatibility
-        self.config = config
-        self.project_root = project_root
-        self.openai_mode = config.get("proxy", {}).get("openai_compatible", False)
-        self.tools = {
-            "proxy.test_server.tool": MagicMock(return_value="mock result")
+# Mock ArtifactStore that can be properly awaited
+class MockArtifactStore:
+    """Mock artifact store that doesn't cause await errors."""
+    
+    def __init__(self, storage_provider=None, session_provider=None, bucket=None):
+        self.storage_provider = storage_provider
+        self.session_provider = session_provider
+        self.bucket = bucket
+        
+    async def validate_configuration(self):
+        return {
+            "session": {"status": "ok"},
+            "storage": {"status": "ok"}
         }
         
-    async def start_servers(self):
-        """Mock start_servers implementation."""
-        self.running_servers["test_server"] = {"wrappers": {}}
-        self.running["test_server"] = {"wrappers": {}}
-        
-    async def stop_servers(self):
-        """Mock stop_servers implementation."""
-        self.running_servers.clear()
-        self.running.clear()
-        
-    async def get_all_tools(self):
-        """Mock get_all_tools implementation."""
-        return self.tools
-        
-    async def process_text(self, text):
-        """Mock process_text implementation."""
-        return [{"content": "Processed text", "tool": "proxy.test.tool", "processed": True, "text": text}]
-    
-    async def call_tool(self, name, **kwargs):
-        """Mock call_tool implementation that supports tool name resolution."""
-        # Simple tool name resolution
-        if name.startswith("proxy."):
-            parts = name.split(".")
-            if len(parts) >= 3:
-                server = parts[1]
-                tool = parts[-1]
-        elif "_" in name:
-            parts = name.split("_", 1)
-            if len(parts) == 2:
-                server, tool = parts
-                name = f"proxy.{server}.{tool}"
-        
-        return f"Result from {name} with args {kwargs}"
+    async def close(self):
+        pass
+
+# Create the mock module
+mock_artifacts_mod = MagicMock()
+mock_artifacts_mod.ArtifactStore = MockArtifactStore
+sys.modules["chuk_artifacts"] = mock_artifacts_mod
 
 # Enhanced Native Session Management Mocks
 class MockMCPSessionManager:
@@ -86,7 +65,8 @@ class MockMCPSessionManager:
         session_id = f"session-{len(self._sessions)}-{user_id or 'anon'}"
         self._sessions[session_id] = {
             "user_id": user_id,
-            "metadata": metadata or {},
+            "custom_metadata": metadata or {},
+            "metadata": metadata or {},  # Both formats for compatibility
             "created_at": 1640995200.0,
             "expires_at": 1640995200.0 + (ttl_hours or self.default_ttl_hours) * 3600
         }
@@ -108,7 +88,8 @@ class MockMCPSessionManager:
         
     async def update_session_metadata(self, session_id, metadata):
         if session_id in self._sessions:
-            self._sessions[session_id]["metadata"].update(metadata)
+            self._sessions[session_id]["custom_metadata"].update(metadata)
+            self._sessions[session_id]["metadata"].update(metadata)  # Update both
             return True
         return False
         
@@ -126,9 +107,15 @@ class MockMCPSessionManager:
             mock_user_ctx.set(user_id)
         
     def get_current_session(self):
-        return self._current_session
+        # Get from context variable first, then fallback to instance variable
+        return mock_session_ctx.get() or self._current_session
         
     def get_current_user(self):
+        # Get from context variable first
+        user_from_ctx = mock_user_ctx.get()
+        if user_from_ctx:
+            return user_from_ctx
+            
         if self._current_session and self._current_session in self._sessions:
             return self._sessions[self._current_session].get("user_id")
         return None
@@ -140,8 +127,9 @@ class MockMCPSessionManager:
         mock_user_ctx.set(None)
         
     async def auto_create_session_if_needed(self, user_id=None):
-        if self._current_session and await self.validate_session(self._current_session):
-            return self._current_session
+        current = self.get_current_session()
+        if current and await self.validate_session(current):
+            return current
         session_id = await self.create_session(user_id=user_id, metadata={"auto_created": True})
         self.set_current_session(session_id, user_id)
         return session_id
@@ -183,9 +171,9 @@ class MockSessionContext:
         self.previous_user = None
         
     async def __aenter__(self):
-        # Save previous context
-        self.previous_session = self.session_manager.get_current_session()
-        self.previous_user = self.session_manager.get_current_user()
+        # Save previous context - CRITICAL: Save from context vars, not manager
+        self.previous_session = mock_session_ctx.get()
+        self.previous_user = mock_user_ctx.get()
         
         if self.session_id:
             if not await self.session_manager.validate_session(self.session_id):
@@ -199,11 +187,15 @@ class MockSessionContext:
             raise ValueError("No session provided and auto_create=False")
             
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        # Restore previous context
+        # Restore previous context - CRITICAL: Restore to context vars AND manager
         if self.previous_session:
-            self.session_manager.set_current_session(self.previous_session, self.previous_user)
+            mock_session_ctx.set(self.previous_session)
+            mock_user_ctx.set(self.previous_user)
+            self.session_manager._current_session = self.previous_session
         else:
-            self.session_manager.clear_context()
+            mock_session_ctx.set(None)
+            mock_user_ctx.set(None)
+            self.session_manager._current_session = None
 
 # Mock session helper functions with proper context variable access
 def mock_require_session():
@@ -211,8 +203,8 @@ def mock_require_session():
     session_id = mock_session_ctx.get()
     if not session_id:
         # Import the actual exception class
-        from chuk_mcp_runtime.session.native_session_management import SessionError
-        raise SessionError("No session context available")
+        from tests.conftest import MockSessionError
+        raise MockSessionError("No session context available")
     return session_id
 
 def mock_get_session_or_none():
@@ -243,8 +235,8 @@ def mock_session_required(func):
     async def wrapper(*args, **kwargs):
         session_id = mock_get_session_or_none()
         if not session_id:
-            from chuk_mcp_runtime.session.native_session_management import SessionError
-            raise SessionError(f"Tool '{func.__name__}' requires session context")
+            from tests.conftest import MockSessionError
+            raise MockSessionError(f"Tool '{func.__name__}' requires session context")
         return await func(*args, **kwargs)
     wrapper.__name__ = func.__name__
     return wrapper
@@ -255,6 +247,31 @@ def mock_session_optional(func):
         return await func(*args, **kwargs)
     wrapper.__name__ = func.__name__
     return wrapper
+
+# Exception classes
+class MockSessionError(Exception):
+    """Mock SessionError for testing."""
+    pass
+
+class MockSessionNotFoundError(MockSessionError):
+    """Mock SessionNotFoundError for testing."""
+    pass
+
+class MockSessionValidationError(MockSessionError):
+    """Mock SessionValidationError for testing."""
+    pass
+
+# Mock the validate_session_parameter function for artifacts_tools.py
+def mock_validate_session_parameter(session_id=None, operation="unknown"):
+    """Mock validate_session_parameter for artifact tools."""
+    if session_id:
+        return session_id
+    
+    current = mock_get_session_or_none()
+    if current:
+        return current
+        
+    raise MockSessionError(f"Operation '{operation}' requires valid session_id or session context")
 
 # Create session management module mock with all components
 session_mgmt_mod = MagicMock()
@@ -274,47 +291,51 @@ session_mgmt_mod.get_user_or_none = mock_get_user_or_none
 session_mgmt_mod.with_session_auto_inject = mock_with_session_auto_inject
 session_mgmt_mod.session_required = mock_session_required
 session_mgmt_mod.session_optional = mock_session_optional
-
-# Add exception classes
-class MockSessionError(Exception):
-    """Mock SessionError for testing."""
-    pass
-
-class MockSessionNotFoundError(MockSessionError):
-    """Mock SessionNotFoundError for testing."""
-    pass
-
-class MockSessionValidationError(MockSessionError):
-    """Mock SessionValidationError for testing."""
-    pass
-
 session_mgmt_mod.SessionError = MockSessionError
 session_mgmt_mod.SessionNotFoundError = MockSessionNotFoundError
 session_mgmt_mod.SessionValidationError = MockSessionValidationError
-
-# Mock the validate_session_parameter function for artifacts_tools.py
-def mock_validate_session_parameter(session_id=None, operation="unknown"):
-    """Mock validate_session_parameter for artifact tools."""
-    if session_id:
-        return session_id
-    
-    current = mock_get_session_or_none()
-    if current:
-        return current
-        
-    raise MockSessionError(f"Operation '{operation}' requires valid session_id or session context")
-
 session_mgmt_mod.validate_session_parameter = mock_validate_session_parameter
 
 # Register the session management module
 sys.modules["chuk_mcp_runtime.session.native_session_management"] = session_mgmt_mod
+
+# Mock proxy manager
+class MockProxyServerManager:
+    """Mock implementation of ProxyServerManager for testing."""
+    def __init__(self, config, project_root):
+        self.running_servers = {}
+        self.running = {}  # Add this for compatibility
+        self.config = config
+        self.project_root = project_root
+        self.openai_mode = config.get("proxy", {}).get("openai_compatible", False)
+        self.tools = {
+            "proxy.test_server.tool": MagicMock(return_value="mock result")
+        }
+        
+    async def start_servers(self):
+        """Mock start_servers implementation."""
+        self.running_servers["test_server"] = {"wrappers": {}}
+        self.running["test_server"] = {"wrappers": {}}
+        
+    async def stop_servers(self):
+        """Mock stop_servers implementation."""
+        self.running_servers.clear()
+        self.running.clear()
+        
+    async def get_all_tools(self):
+        """Mock get_all_tools implementation."""
+        return self.tools
+        
+    async def process_text(self, text):
+        """Mock process_text implementation."""
+        return [{"content": "Processed text", "tool": "proxy.test.tool", "processed": True, "text": text}]
 
 # Create a proxy manager module with the mock class
 proxy_manager_mod = MagicMock()
 proxy_manager_mod.ProxyServerManager = MockProxyServerManager
 sys.modules["chuk_mcp_runtime.proxy.manager"] = proxy_manager_mod
 
-# After these mocks are in place, we can import pytest
+# Import necessary modules for testing
 import pytest
 import asyncio
 import os
@@ -372,10 +393,10 @@ def run_async(coro):
         
     return loop.run_until_complete(coro)
 
-class AsyncMock(MagicMock):
-    """Mock that works with async functions."""
+class TestAsyncMock(MagicMock):
+    """Mock that works with async functions - renamed to avoid pytest collection."""
     async def __call__(self, *args, **kwargs):
-        return super(AsyncMock, self).__call__(*args, **kwargs)
+        return super(TestAsyncMock, self).__call__(*args, **kwargs)
         
     # Add support for async context manager
     async def __aenter__(self, *args, **kwargs):
@@ -470,7 +491,7 @@ __all__ = [
     "MockProxyServerManager",
     "DummyMCPServer",
     "DummyServerRegistry",
-    "AsyncMock",
+    "TestAsyncMock",
     "run_async",
     "mock_require_session",
     "mock_get_session_or_none",
@@ -479,5 +500,7 @@ __all__ = [
     "mock_session_optional",
     "MockSessionError",
     "MockSessionNotFoundError",
-    "MockSessionValidationError"
+    "MockSessionValidationError",
+    "mock_session_ctx",
+    "mock_user_ctx"
 ]
