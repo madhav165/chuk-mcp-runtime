@@ -349,12 +349,13 @@ wheels = [
 
 [[package]]
 name = "chuk-mcp-runtime"
-version = "0.6"
+version = "0.6.1"
 source = { editable = "." }
 dependencies = [
     { name = "chuk-artifacts" },
     { name = "chuk-sessions" },
     { name = "cryptography" },
+    { name = "mcp" },
     { name = "pydantic" },
     { name = "pyjwt" },
     { name = "pyyaml" },
@@ -379,6 +380,7 @@ requires-dist = [
     { name = "chuk-artifacts", specifier = ">=0.4" },
     { name = "chuk-sessions", specifier = ">=0.4.2" },
     { name = "cryptography", specifier = ">=44.0.3" },
+    { name = "mcp", specifier = ">=1.9.4" },
     { name = "pydantic", specifier = ">=2.10.6" },
     { name = "pyjwt", specifier = ">=2.10.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.5" },
