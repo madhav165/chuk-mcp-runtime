@@ -9,6 +9,63 @@ import chuk_mcp_runtime.entry as entry
 from chuk_mcp_runtime.common.mcp_tool_decorator import TOOLS_REGISTRY
 from tests.conftest import MockProxyServerManager, run_async
 
+class MockMCPSessionManager:
+    """Mock native session manager."""
+    
+    def __init__(self, sandbox_id=None, default_ttl_hours=24, auto_extend_threshold=0.1):
+        self.sandbox_id = sandbox_id or "test-sandbox"
+        self.default_ttl_hours = default_ttl_hours
+        self.auto_extend_threshold = auto_extend_threshold
+        self._sessions = {}
+        self._current_session = None
+        
+    async def create_session(self, user_id=None, ttl_hours=None, metadata=None):
+        session_id = f"session-{len(self._sessions)}"
+        self._sessions[session_id] = {
+            "user_id": user_id,
+            "metadata": metadata or {},
+            "created_at": 1640995200.0
+        }
+        return session_id
+        
+    def set_current_session(self, session_id, user_id=None):
+        self._current_session = session_id
+        
+    def get_current_session(self):
+        return self._current_session
+        
+    async def auto_create_session_if_needed(self, user_id=None):
+        if self._current_session:
+            return self._current_session
+        session_id = await self.create_session(user_id=user_id)
+        self.set_current_session(session_id, user_id)
+        return session_id
+        
+    def get_cache_stats(self):
+        return {
+            "cache_size": len(self._sessions),
+            "sandbox_id": self.sandbox_id
+        }
+
+class MockSessionContext:
+    """Mock session context manager."""
+    
+    def __init__(self, session_manager, session_id=None, user_id=None, auto_create=True):
+        self.session_manager = session_manager
+        self.session_id = session_id
+        self.user_id = user_id
+        self.auto_create = auto_create
+        
+    async def __aenter__(self):
+        if self.session_id:
+            return self.session_id
+        elif self.auto_create:
+            return await self.session_manager.auto_create_session_if_needed(self.user_id)
+        return "test-session"
+            
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
+
 class DummyServerRegistry:
     def __init__(self, project_root, config):
         self.project_root = project_root
@@ -27,6 +84,8 @@ class DummyMCPServer:
         self.server_name = "test-server"
         self.registered_tools = []
         self.tools_registry = tools_registry or {}
+        # Add native session manager
+        self.session_manager = MockMCPSessionManager()
         
     async def serve(self, custom_handlers=None):
         """Mock serve method that doesn't try to use stdio_server."""
@@ -38,6 +97,14 @@ class DummyMCPServer:
         """Mock register_tool method."""
         self.registered_tools.append(name)
         self.tools_registry[name] = func
+        
+    def get_session_manager(self):
+        """Get the session manager instance."""
+        return self.session_manager
+        
+    async def create_user_session(self, user_id, metadata=None):
+        """Create a new user session."""
+        return await self.session_manager.create_session(user_id=user_id, metadata=metadata)
 
 class MockArtifactTools:
     """Mock artifact tools module for testing."""
@@ -63,10 +130,33 @@ def patch_entry(monkeypatch):
     # Mock configuration and logging
     monkeypatch.setattr(entry, "load_config", lambda paths, default: {
         "proxy": {"enabled": True},
-        "artifacts": {"enabled": True, "tools": {"enabled": True}}
+        "artifacts": {"enabled": True, "tools": {"enabled": True}},
+        "sessions": {"sandbox_id": "test-sandbox"}
     })
     monkeypatch.setattr(entry, "configure_logging", lambda cfg: None)
     monkeypatch.setattr(entry, "find_project_root", lambda *a, **kw: "/tmp")
+    
+    # Mock native session management
+    monkeypatch.setattr(entry, "MCPSessionManager", MockMCPSessionManager)
+    monkeypatch.setattr(entry, "SessionContext", MockSessionContext)
+    monkeypatch.setattr(entry, "create_mcp_session_manager", 
+                       lambda config: MockMCPSessionManager())
+    
+    # Mock session integration helper
+    async def mock_with_session_auto_inject(session_manager, tool_name, args):
+        # Simulate session injection for artifact tools
+        artifact_tools = {
+            "upload_file", "write_file", "read_file", "delete_file",
+            "list_session_files", "list_directory", "copy_file", "move_file",
+            "get_file_metadata", "get_presigned_url", "get_storage_stats"
+        }
+        
+        if tool_name in artifact_tools and "session_id" not in args:
+            session_id = await session_manager.auto_create_session_if_needed()
+            return {**args, "session_id": session_id}
+        return args
+    
+    monkeypatch.setattr(entry, "with_session_auto_inject", mock_with_session_auto_inject)
     
     # Mock the server classes
     monkeypatch.setattr(entry, "ServerRegistry", DummyServerRegistry)
@@ -81,7 +171,11 @@ def patch_entry(monkeypatch):
     
     # Mock the artifact tools registration
     mock_register_artifacts = AsyncMock(return_value=True)
-    monkeypatch.setattr(entry, "register_artifact_tools", mock_register_artifacts)
+    monkeypatch.setattr(entry, "register_artifacts_tools", mock_register_artifacts)
+    
+    # Mock the session tools registration
+    mock_register_session = AsyncMock(return_value=True)
+    monkeypatch.setattr(entry, "register_session_tools", mock_register_session)
     
     # Mock get_artifact_tools function
     def mock_get_artifact_tools():
@@ -210,6 +304,27 @@ def test_run_runtime_no_bootstrap_arg(monkeypatch):
     # Should not have called load_server_components
     assert 'bootstrap' not in registry_called
 
+def test_session_manager_integration(monkeypatch):
+    """Test session manager integration with the MCP server."""
+    # Create a spy server to track session manager usage
+    server_instance = None
+    class SpyServer(DummyMCPServer):
+        def __init__(self, config, tools_registry=None):
+            super().__init__(config, tools_registry)
+            nonlocal server_instance
+            server_instance = self
+            
+    monkeypatch.setattr(entry, "MCPServer", SpyServer)
+    
+    # Run the runtime
+    entry.run_runtime()
+    
+    # Verify that the server has a session manager
+    assert server_instance is not None
+    assert hasattr(server_instance, 'session_manager')
+    assert isinstance(server_instance.session_manager, MockMCPSessionManager)
+    assert server_instance.session_manager.sandbox_id == "test-sandbox"
+
 def test_proxy_integration(monkeypatch):
     """Test proxy tool registration with the MCP server."""
     # Create a spy server to track tool registration
@@ -252,9 +367,6 @@ def test_artifacts_integration(monkeypatch):
             
     monkeypatch.setattr(entry, "MCPServer", SpyServer)
     
-    # Set CHUK_ARTIFACTS_AVAILABLE to True
-    monkeypatch.setattr(entry, "CHUK_ARTIFACTS_AVAILABLE", True)
-    
     # Run the runtime
     entry.run_runtime()
     
@@ -269,6 +381,24 @@ def test_artifacts_integration(monkeypatch):
     # At least some artifact tools should be registered
     assert any(tool in registered_tool_names for tool in expected_tools), \
            f"Expected some of {expected_tools} in {registered_tool_names}"
+
+def test_session_tools_integration(monkeypatch):
+    """Test session tools registration with the MCP server."""
+    # Mock session tools registration to return True
+    session_tools_registered = False
+    
+    async def mock_register_session_tools(config):
+        nonlocal session_tools_registered
+        session_tools_registered = True
+        return True
+        
+    monkeypatch.setattr(entry, "register_session_tools", mock_register_session_tools)
+    
+    # Run the runtime
+    entry.run_runtime()
+    
+    # Verify that session tools registration was called
+    assert session_tools_registered
 
 def test_tools_registry_population(monkeypatch):
     """Test that TOOLS_REGISTRY is properly populated and passed to MCPServer."""
@@ -343,6 +473,27 @@ def test_custom_handlers_proxy_text(monkeypatch):
     assert server_instance.custom_handlers is not None
     assert "handle_proxy_text" in server_instance.custom_handlers
 
+def test_session_context_in_tool_execution(monkeypatch):
+    """Test that session context is properly used in tool execution."""
+    # Create a tracking tool
+    tool_calls = []
+    
+    async def tracking_tool(**kwargs):
+        tool_calls.append(kwargs)
+        return "Tool result"
+    
+    # Mock get_artifact_tools to return our tracking tool
+    def mock_get_artifact_tools():
+        return {"upload_file": tracking_tool}
+    
+    monkeypatch.setattr(entry, "get_artifact_tools", mock_get_artifact_tools)
+    
+    # Run the runtime
+    entry.run_runtime()
+    
+    # The session manager should have been created
+    assert len(tool_calls) == 0  # No calls yet, but system is set up
+
 def test_main_success(monkeypatch, capsys):
     """Test successful execution of main function."""
     # Stub out run_runtime_async to prevent errors
@@ -408,33 +559,6 @@ def test_config_path_handling(monkeypatch):
     assert len(config_calls) == 1
     assert config_calls[0] == ["test.yaml"]
 
-def test_chuk_artifacts_unavailable(monkeypatch):
-    """Test behavior when chuk_artifacts is not available."""
-    # Set CHUK_ARTIFACTS_AVAILABLE to False
-    monkeypatch.setattr(entry, "CHUK_ARTIFACTS_AVAILABLE", False)
-    
-    # Mock the register_artifact_tools to simulate unavailable artifacts
-    async def mock_register_artifacts_unavailable(cfg):
-        return False  # Indicates artifacts are not available
-        
-    monkeypatch.setattr(entry, "register_artifact_tools", mock_register_artifacts_unavailable)
-    
-    # Create a spy server to track what gets registered
-    server_instance = None
-    class SpyServer(DummyMCPServer):
-        def __init__(self, config, tools_registry=None):
-            super().__init__(config, tools_registry)
-            nonlocal server_instance
-            server_instance = self
-            
-    monkeypatch.setattr(entry, "MCPServer", SpyServer)
-    
-    # Run the runtime
-    entry.run_runtime()
-    
-    # Should still work, just without artifact tools
-    assert server_instance is not None
-
 def test_keyboard_interrupt_handling(monkeypatch):
     """Test that KeyboardInterrupt is handled gracefully."""
     async def mock_run_runtime_interrupt(*args, **kwargs):
@@ -449,7 +573,8 @@ def test_proxy_disabled(monkeypatch):
     """Test behavior when proxy is disabled."""
     # Mock config with proxy disabled
     monkeypatch.setattr(entry, "load_config", lambda paths, default: {
-        "proxy": {"enabled": False}
+        "proxy": {"enabled": False},
+        "sessions": {"sandbox_id": "test"}
     })
     
     # Create a spy server

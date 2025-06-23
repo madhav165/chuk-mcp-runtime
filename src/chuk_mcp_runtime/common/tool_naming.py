@@ -64,7 +64,7 @@ class ToolNamingResolver:
     
     def resolve_tool_name(self, name: str) -> str:
         """
-        Resolve a tool name to its registered form in TOOLS_REGISTRY.
+        Resoalve a tool name to its registered form in TOOLS_REGISTRY.
         
         Args:
             name: The tool name to resolve (can be dot or underscore notation)
