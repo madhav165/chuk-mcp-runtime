@@ -7,7 +7,22 @@ import warnings
 from unittest.mock import MagicMock, AsyncMock, patch
 from contextvars import copy_context
 
-from chuk_mcp_runtime.session.session_management import (
+from chuk_mcp_runtime.session import (
+    # Native API
+    MCPSessionManager,
+    SessionContext,
+    create_mcp_session_manager,
+    require_session,
+    get_session_or_none,
+    get_user_or_none,
+    with_session_auto_inject,
+    session_required,
+    session_optional,
+    SessionError,
+    SessionNotFoundError,
+    SessionValidationError,
+    
+    # Legacy compatibility functions (now raise NotImplementedError)
     set_session_context,
     get_session_context,
     clear_session_context,
@@ -20,637 +35,480 @@ from chuk_mcp_runtime.session.session_management import (
     clear_session_data,
     list_sessions,
     session_aware,
-    SessionContext,
-    SessionError,
-    list_sessions_cache_stats,
-    cleanup_expired_sessions,
-    _session_store,
-    _mgr
 )
-
-# Suppress expected warnings for async operations in sync tests
-warnings.filterwarnings("ignore", category=RuntimeWarning, module="chuk_mcp_runtime.session.session_management")
-warnings.filterwarnings("ignore", message=".*coroutine.*was never awaited.*", category=RuntimeWarning)
 
 class MockSessionManager:
     """Mock session manager for testing."""
     
-    def __init__(self):
-        self._session_cache = {}
+    def __init__(self, sandbox_id="test"):
+        self.sandbox_id = sandbox_id
         self.sessions_data = {}
+        self.current_session = None
+        self.current_user = None
         
-    async def update_session_metadata(self, session_id, data):
-        if session_id not in self.sessions_data:
-            self.sessions_data[session_id] = {"custom_metadata": {}}
-        self.sessions_data[session_id]["custom_metadata"].update(data)
+    async def create_session(self, user_id=None, ttl_hours=24, metadata=None):
+        import uuid
+        session_id = f"session-{uuid.uuid4().hex[:8]}"
+        self.sessions_data[session_id] = {
+            "user_id": user_id,
+            "ttl_hours": ttl_hours,
+            "custom_metadata": metadata or {},
+            "created_at": 1234567890,
+            "expires_at": 1234567890 + (ttl_hours * 3600)
+        }
+        return session_id
         
     async def get_session_info(self, session_id):
         return self.sessions_data.get(session_id)
         
+    async def validate_session(self, session_id):
+        return session_id in self.sessions_data
+        
+    async def update_session_metadata(self, session_id, metadata):
+        if session_id in self.sessions_data:
+            self.sessions_data[session_id]["custom_metadata"].update(metadata)
+            return True
+        return False
+        
     async def delete_session(self, session_id):
-        self.sessions_data.pop(session_id, None)
-        self._session_cache.pop(session_id, None)
+        return self.sessions_data.pop(session_id, None) is not None
+        
+    def set_current_session(self, session_id, user_id=None):
+        self.current_session = session_id
+        self.current_user = user_id
+        
+    def get_current_session(self):
+        return self.current_session
+        
+    def get_current_user(self):
+        return self.current_user
+        
+    def clear_context(self):
+        self.current_session = None
+        self.current_user = None
+        
+    async def auto_create_session_if_needed(self, user_id=None):
+        if self.current_session and await self.validate_session(self.current_session):
+            return self.current_session
+        
+        session_id = await self.create_session(user_id=user_id)
+        self.set_current_session(session_id, user_id)
+        return session_id
         
     def get_cache_stats(self):
         return {
-            "cache_size": len(self._session_cache),
+            "cache_size": len(self.sessions_data),
             "total_sessions": len(self.sessions_data)
         }
         
     async def cleanup_expired_sessions(self):
-        # Mock cleanup - just return count
-        return len(self.sessions_data)
+        return 0
 
 @pytest.fixture
-def mock_session_manager():
+async def session_manager():
     """Provide a mock session manager."""
-    manager = MockSessionManager()
-    
-    # Mock the _mgr function to return our mock
-    def mock_mgr():
-        return manager
-        
-    with patch('chuk_mcp_runtime.session.session_management._mgr', mock_mgr):
-        yield manager
+    return MockSessionManager()
 
-@pytest.fixture(autouse=True)
-def clear_session_state():
-    """Clear session state before and after each test."""
-    # Clear context and store before test
-    clear_session_context()
-    _session_store.clear()
-    
-    yield
-    
-    # Clear after test
-    clear_session_context()
-    _session_store.clear()
+@pytest.fixture
+async def real_session_manager():
+    """Provide a real session manager for integration tests."""
+    # Use memory provider for tests
+    os.environ['SESSION_PROVIDER'] = 'memory'
+    manager = MCPSessionManager(sandbox_id="test", default_ttl_hours=1)
+    yield manager
+    # Cleanup after test
+    await manager.cleanup_expired_sessions()
 
-class TestBasicSessionContext:
-    """Test basic session context operations."""
+class TestNativeSessionManager:
+    """Test the native MCPSessionManager."""
     
-    def test_set_and_get_session_context(self):
-        """Test setting and getting session context."""
-        session_id = "test-session-123"
+    @pytest.mark.asyncio
+    async def test_session_manager_creation(self):
+        """Test creating a session manager."""
+        manager = MCPSessionManager(sandbox_id="test-app")
+        assert manager.sandbox_id == "test-app"
+        assert manager.default_ttl_hours == 24
         
-        # Initially no session
-        assert get_session_context() is None
-        
-        # Set session
-        set_session_context(session_id)
-        assert get_session_context() == session_id
-        
-    def test_set_session_context_validation(self):
-        """Test session context validation."""
-        # Empty session should raise error
-        with pytest.raises(SessionError, match="Session ID cannot be empty"):
-            set_session_context("")
-            
-        with pytest.raises(SessionError, match="Session ID cannot be empty"):
-            set_session_context("   ")
-            
-    def test_clear_session_context(self):
-        """Test clearing session context."""
-        set_session_context("test-session")
-        assert get_session_context() == "test-session"
-        
-        clear_session_context()
-        assert get_session_context() is None
-        
-    def test_session_context_isolation(self):
-        """Test that session context is isolated per task."""
-        results = {}
-        
-        async def task_with_session(session_id, task_id):
-            set_session_context(session_id)
-            await asyncio.sleep(0.01)  # Yield control
-            results[task_id] = get_session_context()
-            
-        async def run_concurrent_tasks():
-            tasks = [
-                task_with_session("session-1", "task-1"),
-                task_with_session("session-2", "task-2"),
-                task_with_session("session-3", "task-3"),
-            ]
-            await asyncio.gather(*tasks)
-            
-        asyncio.run(run_concurrent_tasks())
-        
-        # Each task should maintain its own session
-        assert results["task-1"] == "session-1"
-        assert results["task-2"] == "session-2"
-        assert results["task-3"] == "session-3"
-
-class TestSessionNormalization:
-    """Test session ID normalization and validation."""
-    
-    def test_normalize_session_id_valid(self):
-        """Test normalization of valid session IDs."""
-        assert normalize_session_id("test-session") == "test-session"
-        assert normalize_session_id("  test-session  ") == "test-session"
-        assert normalize_session_id("session_123") == "session_123"
-        assert normalize_session_id("session.with.dots") == "session.with.dots"
-        
-    def test_normalize_session_id_invalid(self):
-        """Test validation of invalid session IDs."""
-        # None or empty
-        with pytest.raises(SessionError, match="Session ID cannot be None or empty"):
-            normalize_session_id(None)
-            
-        with pytest.raises(SessionError, match="Session ID cannot be None or empty"):
-            normalize_session_id("")
-            
-        with pytest.raises(SessionError, match="empty after normalization"):
-            normalize_session_id("   ")
-            
-        # Too long
-        long_id = "x" * 101
-        with pytest.raises(SessionError, match="Session ID too long"):
-            normalize_session_id(long_id)
-            
-        # Invalid characters
-        with pytest.raises(SessionError, match="invalid characters"):
-            normalize_session_id("session@invalid")
-            
-        with pytest.raises(SessionError, match="invalid characters"):
-            normalize_session_id("session with spaces")
-            
-    def test_require_session_context(self):
-        """Test requiring session context."""
-        # No session should raise error
-        with pytest.raises(SessionError, match="No session context available"):
-            require_session_context()
-            
-        # With session should return it
-        set_session_context("test-session")
-        assert require_session_context() == "test-session"
-        
-    def test_get_effective_session_id(self):
-        """Test getting effective session ID."""
-        # Provided session takes precedence
-        set_session_context("context-session")
-        assert get_effective_session_id("provided-session") == "provided-session"
-        
-        # Context session when no provided session
-        assert get_effective_session_id() == "context-session"
-        
-        # Error when no session available
-        clear_session_context()
-        with pytest.raises(SessionError, match="No session_id provided"):
-            get_effective_session_id()
-            
-    def test_validate_session_parameter(self):
-        """Test session parameter validation for operations."""
-        # Valid provided session
-        result = validate_session_parameter("test-session", "test_operation")
-        assert result == "test-session"
-        
-        # Valid context session
-        set_session_context("context-session")
-        result = validate_session_parameter(None, "test_operation")
-        assert result == "context-session"
-        
-        # Invalid session raises ValueError with operation name
-        clear_session_context()
-        with pytest.raises(ValueError, match="Operation 'test_operation' requires"):
-            validate_session_parameter(None, "test_operation")
-
-class TestSessionDataManagement:
-    """Test session data storage and retrieval."""
-    
-    def test_session_data_operations(self, mock_session_manager):
-        """Test basic session data operations."""
-        session_id = "test-session"
-        
-        # Set data directly in local store to avoid async task creation
-        _session_store[session_id] = {
-            "key1": "value1",
-            "key2": {"nested": "data"}
+    @pytest.mark.asyncio
+    async def test_session_manager_from_config(self):
+        """Test creating session manager from config."""
+        config = {
+            "sessions": {
+                "sandbox_id": "config-app",
+                "default_ttl_hours": 8
+            }
         }
-        
-        # Get data - should only access local store
-        assert get_session_data(session_id, "key1") == "value1"
-        assert get_session_data(session_id, "key2") == {"nested": "data"}
-        
-        # Test with non-existent key - this will try async fallback, so we'll test differently
-        assert session_id in _session_store  # Verify session exists locally
-        
-        # Test accessing key that doesn't exist in local store
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            result = get_session_data(session_id, "nonexistent", "default")
-            assert result == "default"
-        
-    def test_session_data_with_manager_fallback(self, mock_session_manager):
-        """Test session data fallback to session manager."""
-        session_id = "test-session"
-        
-        # Set up manager data
-        mock_session_manager.sessions_data[session_id] = {
-            "custom_metadata": {"manager_key": "manager_value"}
-        }
-        
-        # Test when data is NOT in local store - should fall back to manager
-        # Suppress warnings for this specific test case
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            result = get_session_data(session_id, "manager_key", "default")
-            assert result == "manager_value"  # Manager fallback works
-        
-        # Test when data IS in local store - should return local value
-        _session_store[session_id] = {"local_key": "local_value"}
-        result = get_session_data(session_id, "local_key", "default")
-        assert result == "local_value"
-        
-        # Test when data is not in either store - should return default
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            result = get_session_data(session_id, "nonexistent_key", "default")
-            assert result == "default"
+        manager = create_mcp_session_manager(config)
+        assert manager.sandbox_id == "config-app"
+        assert manager.default_ttl_hours == 8
         
     @pytest.mark.asyncio
-    async def test_clear_session_data(self, mock_session_manager):
-        """Test clearing session data."""
-        session_id = "test-session"
+    async def test_session_lifecycle(self, session_manager):
+        """Test complete session lifecycle."""
+        # Create session
+        session_id = await session_manager.create_session(
+            user_id="test_user",
+            metadata={"role": "admin"}
+        )
+        assert session_id.startswith("session-")
         
-        # Set some data directly to avoid async task issues
-        _session_store[session_id] = {"key1": "value1"}
-        assert get_session_data(session_id, "key1") == "value1"
+        # Validate session
+        is_valid = await session_manager.validate_session(session_id)
+        assert is_valid is True
         
-        # Clear data (this will work in async context)
-        clear_session_data(session_id)
+        # Get session info
+        info = await session_manager.get_session_info(session_id)
+        assert info["user_id"] == "test_user"
+        assert info["custom_metadata"]["role"] == "admin"
         
-        # Allow async task to complete
-        await asyncio.sleep(0.01)
+        # Update metadata
+        success = await session_manager.update_session_metadata(
+            session_id, {"last_activity": "2024-01-01"}
+        )
+        assert success is True
         
-        # Test that data is gone - suppress warnings for async fallback attempt
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            result = get_session_data(session_id, "key1", "default")
-            assert result == "default"
-            
-    def test_clear_session_data_local_store_only(self, mock_session_manager):
-        """Test clearing session data from local store without async operations."""
-        session_id = "test-session-local"
+        # Verify update
+        info = await session_manager.get_session_info(session_id)
+        assert info["custom_metadata"]["last_activity"] == "2024-01-01"
         
-        # Set some data directly
-        _session_store[session_id] = {"key1": "value1"}
-        assert get_session_data(session_id, "key1") == "value1"
+        # Delete session
+        deleted = await session_manager.delete_session(session_id)
+        assert deleted is True
         
-        # Clear data from local store directly to avoid async task
-        _session_store.pop(session_id, None)
-        
-        # Test that data is gone
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            result = get_session_data(session_id, "key1", "default")
-            assert result == "default"
-        
-    @pytest.mark.asyncio
-    async def test_list_sessions(self, mock_session_manager):
-        """Test listing sessions."""
-        # Add some sessions to both stores directly
-        _session_store["session1"] = {"key": "value"}
-        _session_store["session2"] = {"key": "value"}
-        mock_session_manager._session_cache["session3"] = {}
-        
-        sessions = list_sessions()
-        assert "session1" in sessions
-        assert "session2" in sessions
-        assert "session3" in sessions
-        
-    @pytest.mark.asyncio
-    async def test_set_session_data_async(self, mock_session_manager):
-        """Test setting session data in async context."""
-        session_id = "test-session"
-        
-        # This should work in async context
-        set_session_data(session_id, "async_key", "async_value")
-        
-        # Allow async task to complete
-        await asyncio.sleep(0.01)
-        
-        # Check local store
-        assert get_session_data(session_id, "async_key") == "async_value"
+        # Verify deletion
+        is_valid = await session_manager.validate_session(session_id)
+        assert is_valid is False
 
-class TestSessionAwareDecorator:
-    """Test the session_aware decorator."""
-    
-    def test_session_aware_decorator_with_session(self):
-        """Test session_aware decorator when session is available."""
-        @session_aware(require_session=True)
-        def test_func():
-            return "success"
-            
-        # Should work when session is set
-        set_session_context("test-session")
-        result = test_func()
-        assert result == "success"
-        
-    def test_session_aware_decorator_without_session(self):
-        """Test session_aware decorator when session is missing."""
-        @session_aware(require_session=True)
-        def test_func():
-            return "success"
-            
-        # Should fail when no session
-        clear_session_context()
-        with pytest.raises(ValueError, match="requires session context"):
-            test_func()
-            
-    def test_session_aware_decorator_optional(self):
-        """Test session_aware decorator with optional session."""
-        @session_aware(require_session=False)
-        def test_func():
-            return "success"
-            
-        # Should work without session when not required
-        clear_session_context()
-        result = test_func()
-        assert result == "success"
-
-class TestSessionContextManager:
-    """Test the SessionContext async context manager."""
+class TestSessionContext:
+    """Test the SessionContext context manager."""
     
     @pytest.mark.asyncio
-    async def test_session_context_manager(self):
-        """Test SessionContext as async context manager."""
-        # Set initial session
-        set_session_context("initial-session")
-        assert get_session_context() == "initial-session"
+    async def test_session_context_with_existing_session(self, session_manager):
+        """Test SessionContext with an existing session."""
+        # Create a session first
+        session_id = await session_manager.create_session(user_id="test_user")
         
-        # Use context manager
-        async with SessionContext("temp-session"):
-            assert get_session_context() == "temp-session"
+        async with SessionContext(session_manager, session_id=session_id) as ctx_session_id:
+            assert ctx_session_id == session_id
+            assert require_session() == session_id
             
-        # Should restore previous session
-        assert get_session_context() == "initial-session"
+        # Context should be cleared after exiting
+        assert get_session_or_none() is None
         
     @pytest.mark.asyncio
-    async def test_session_context_manager_no_previous(self):
-        """Test SessionContext when no previous session."""
-        clear_session_context()
-        assert get_session_context() is None
-        
-        async with SessionContext("temp-session"):
-            assert get_session_context() == "temp-session"
+    async def test_session_context_auto_create(self, session_manager):
+        """Test SessionContext with auto-creation."""
+        async with SessionContext(session_manager, user_id="auto_user") as session_id:
+            assert session_id is not None
+            assert require_session() == session_id
             
-        # Should clear session after context
-        assert get_session_context() is None
-        
+            # Verify session was created
+            info = await session_manager.get_session_info(session_id)
+            assert info["user_id"] == "auto_user"
+            
     @pytest.mark.asyncio
-    async def test_session_context_manager_exception(self):
+    async def test_session_context_exception_handling(self, session_manager):
         """Test SessionContext handles exceptions properly."""
-        set_session_context("initial-session")
+        session_id = await session_manager.create_session()
+        session_manager.set_current_session("previous_session")
         
         try:
-            async with SessionContext("temp-session"):
-                assert get_session_context() == "temp-session"
-                raise ValueError("test exception")
+            async with SessionContext(session_manager, session_id=session_id):
+                assert require_session() == session_id
+                raise ValueError("Test exception")
         except ValueError:
             pass
             
-        # Should still restore previous session
-        assert get_session_context() == "initial-session"
+        # Should restore previous context
+        assert session_manager.get_current_session() == "previous_session"
 
-class TestSessionCacheAndCleanup:
-    """Test session cache statistics and cleanup."""
+class TestSessionHelpers:
+    """Test session helper functions."""
     
-    def test_list_sessions_cache_stats(self, mock_session_manager):
-        """Test getting cache statistics."""
-        stats = list_sessions_cache_stats()
-        assert isinstance(stats, dict)
-        assert "cache_size" in stats or "total_sessions" in stats
+    @pytest.mark.asyncio
+    async def test_require_session(self, session_manager):
+        """Test require_session function."""
+        # Should raise when no session
+        with pytest.raises(SessionError, match="No session context available"):
+            require_session()
+            
+        # Should return session when available
+        async with SessionContext(session_manager, user_id="test") as session_id:
+            assert require_session() == session_id
+            
+    def test_get_session_or_none(self):
+        """Test get_session_or_none function."""
+        # Should return None when no session
+        assert get_session_or_none() is None
+        
+        # Note: Testing with session requires async context
         
     @pytest.mark.asyncio
-    async def test_cleanup_expired_sessions(self, mock_session_manager):
-        """Test cleanup of expired sessions."""
-        # Add some test data
-        mock_session_manager.sessions_data["session1"] = {}
-        mock_session_manager.sessions_data["session2"] = {}
+    async def test_get_user_or_none(self, session_manager):
+        """Test get_user_or_none function."""
+        # Should return None when no user
+        assert get_user_or_none() is None
         
-        count = await cleanup_expired_sessions()
-        assert isinstance(count, int)
-        assert count >= 0
+        # Should return user when available
+        async with SessionContext(session_manager, user_id="test_user"):
+            assert get_user_or_none() == "test_user"
+
+class TestSessionDecorators:
+    """Test session decorators."""
+    
+    @pytest.mark.asyncio
+    async def test_session_required_decorator(self, session_manager):
+        """Test @session_required decorator."""
+        @session_required
+        async def test_tool(data: str):
+            session_id = require_session()
+            return f"Processing {data} in session {session_id}"
+            
+        # Should fail without session
+        with pytest.raises(SessionError):
+            await test_tool("test_data")
+            
+        # Should work with session
+        async with SessionContext(session_manager, user_id="test") as session_id:
+            result = await test_tool("test_data")
+            assert session_id in result
+            assert "test_data" in result
+            
+    @pytest.mark.asyncio
+    async def test_session_optional_decorator(self, session_manager):
+        """Test @session_optional decorator."""
+        @session_optional
+        async def test_tool(data: str):
+            session_id = get_session_or_none()
+            if session_id:
+                return f"Processing {data} in session {session_id}"
+            else:
+                return f"Processing {data} without session"
+                
+        # Should work without session
+        result = await test_tool("test_data")
+        assert "without session" in result
+        
+        # Should work with session
+        async with SessionContext(session_manager, user_id="test") as session_id:
+            result = await test_tool("test_data")
+            assert session_id in result
+
+class TestSessionAutoInjection:
+    """Test automatic session injection for tools."""
+    
+    @pytest.mark.asyncio
+    async def test_with_session_auto_inject_artifact_tool(self, session_manager):
+        """Test auto-injection for artifact tools."""
+        # Test with artifact tool
+        args = {"filename": "test.txt", "content": "test content"}
+        result = await with_session_auto_inject(session_manager, "write_file", args)
+        
+        assert "session_id" in result
+        assert result["filename"] == "test.txt"
+        assert result["content"] == "test content"
+        
+        # Verify session was created
+        session_id = result["session_id"]
+        is_valid = await session_manager.validate_session(session_id)
+        assert is_valid is True
+        
+    @pytest.mark.asyncio
+    async def test_with_session_auto_inject_non_artifact_tool(self, session_manager):
+        """Test auto-injection for non-artifact tools."""
+        # Test with non-artifact tool
+        args = {"message": "hello"}
+        result = await with_session_auto_inject(session_manager, "echo", args)
+        
+        # Should not add session_id for non-artifact tools
+        assert "session_id" not in result
+        assert result["message"] == "hello"
+        
+    @pytest.mark.asyncio
+    async def test_with_session_auto_inject_existing_session(self, session_manager):
+        """Test auto-injection when session_id already provided."""
+        existing_session = await session_manager.create_session()
+        
+        args = {"filename": "test.txt", "session_id": existing_session}
+        result = await with_session_auto_inject(session_manager, "write_file", args)
+        
+        # Should keep existing session_id
+        assert result["session_id"] == existing_session
+
+class TestLegacyCompatibility:
+    """Test legacy function compatibility (should raise NotImplementedError)."""
+    
+    def test_legacy_set_session_context(self):
+        """Test legacy set_session_context raises helpful error."""
+        with pytest.raises(NotImplementedError, match="SessionContext or MCPSessionManager"):
+            set_session_context("test-session")
+            
+    def test_legacy_get_session_context(self):
+        """Test legacy get_session_context raises helpful error."""
+        with pytest.raises(NotImplementedError, match="get_session_or_none or require_session"):
+            get_session_context()
+            
+    def test_legacy_clear_session_context(self):
+        """Test legacy clear_session_context raises helpful error."""
+        with pytest.raises(NotImplementedError, match="SessionContext or MCPSessionManager"):
+            clear_session_context()
+            
+    def test_legacy_set_session_data(self):
+        """Test legacy set_session_data raises helpful error."""
+        with pytest.raises(NotImplementedError, match="MCPSessionManager.update_session_metadata"):
+            set_session_data("session", "key", "value")
+            
+    def test_legacy_get_session_data(self):
+        """Test legacy get_session_data raises helpful error."""
+        with pytest.raises(NotImplementedError, match="MCPSessionManager.get_session_info"):
+            get_session_data("session", "key")
+            
+    def test_legacy_clear_session_data(self):
+        """Test legacy clear_session_data raises helpful error."""
+        with pytest.raises(NotImplementedError, match="MCPSessionManager.delete_session"):
+            clear_session_data("session")
+            
+    def test_legacy_list_sessions(self):
+        """Test legacy list_sessions raises helpful error."""
+        with pytest.raises(NotImplementedError, match="MCPSessionManager.list_active_sessions"):
+            list_sessions()
+            
+    def test_legacy_session_aware_decorator(self):
+        """Test legacy session_aware decorator raises helpful error."""
+        with pytest.raises(NotImplementedError, match="@session_required or @session_optional"):
+            @session_aware(require_session=True)
+            def test_func():
+                pass
+
+class TestErrorHandling:
+    """Test error handling in session management."""
+    
+    @pytest.mark.asyncio
+    async def test_session_not_found_error(self, session_manager):
+        """Test SessionNotFoundError for invalid sessions."""
+        # This test depends on how MCPSessionManager handles invalid sessions
+        # For now, test that invalid sessions return False for validation
+        is_valid = await session_manager.validate_session("invalid-session")
+        assert is_valid is False
+        
+    @pytest.mark.asyncio
+    async def test_session_validation_error(self, session_manager):
+        """Test SessionValidationError scenarios."""
+        # Test with invalid session in SessionContext
+        with pytest.raises(SessionValidationError, match="Session .* is invalid"):
+            async with SessionContext(session_manager, session_id="invalid-session", auto_create=False):
+                pass
 
 class TestIntegrationScenarios:
     """Test real-world integration scenarios."""
     
-    def test_tool_session_injection_scenario(self):
-        """Test scenario where tool gets session injected."""
-        def mock_tool_call(session_id=None, **kwargs):
-            if session_id:
-                return f"Tool called with session: {session_id}"
-            else:
-                # Simulate auto-injection
-                current_session = get_session_context()
-                if current_session:
-                    return f"Tool called with auto session: {current_session}"
-                return "Tool called without session"
-                
-        # Scenario 1: Explicit session provided
-        result = mock_tool_call(session_id="explicit-session", data="test")
-        assert "explicit-session" in result
-        
-        # Scenario 2: Session from context
-        set_session_context("context-session")
-        result = mock_tool_call(data="test")
-        assert "context-session" in result
-        
-        # Scenario 3: No session available
-        clear_session_context()
-        result = mock_tool_call(data="test")
-        assert "without session" in result
-        
     @pytest.mark.asyncio
-    async def test_concurrent_session_operations(self):
-        """Test concurrent session operations don't interfere."""
+    async def test_concurrent_sessions(self, session_manager):
+        """Test concurrent session operations."""
         results = {}
         
-        async def session_worker(worker_id, session_id):
-            set_session_context(session_id)
-            # Use direct store access to avoid async task issues in tests
-            _session_store[session_id] = {"worker": worker_id}
-            
-            # Yield control to other tasks
-            await asyncio.sleep(0.01)
-            
-            # Verify our session is still correct
-            current_session = get_session_context()
-            worker_data = get_session_data(session_id, "worker")
-            
-            results[worker_id] = {
-                "session": current_session,
-                "data": worker_data
-            }
-            
+        async def session_worker(worker_id, user_id):
+            async with SessionContext(session_manager, user_id=user_id) as session_id:
+                # Simulate some work
+                await asyncio.sleep(0.01)
+                
+                # Update session metadata
+                await session_manager.update_session_metadata(
+                    session_id, {"worker_id": worker_id}
+                )
+                
+                # Store results
+                current_session = require_session()
+                info = await session_manager.get_session_info(current_session)
+                
+                results[worker_id] = {
+                    "session_id": current_session,
+                    "user_id": info["user_id"],
+                    "worker_id": info["custom_metadata"]["worker_id"]
+                }
+                
         # Run concurrent workers
         workers = [
-            session_worker("worker1", "session1"),
-            session_worker("worker2", "session2"),
-            session_worker("worker3", "session3"),
+            session_worker("worker1", "user1"),
+            session_worker("worker2", "user2"),
+            session_worker("worker3", "user3"),
         ]
         await asyncio.gather(*workers)
-            
+        
         # Verify each worker maintained its own session
         for i in range(1, 4):
             worker_key = f"worker{i}"
-            session_key = f"session{i}"
+            user_key = f"user{i}"
             
-            assert results[worker_key]["session"] == session_key
-            assert results[worker_key]["data"] == worker_key
+            assert results[worker_key]["user_id"] == user_key
+            assert results[worker_key]["worker_id"] == worker_key
             
-    def test_session_validation_in_artifact_operations(self):
-        """Test session validation for artifact-like operations."""
-        def mock_artifact_operation(operation_name, **kwargs):
-            try:
-                session_id = validate_session_parameter(
-                    kwargs.get("session_id"), 
-                    operation_name
-                )
-                return f"{operation_name} succeeded with session: {session_id}"
-            except ValueError as e:
-                return f"{operation_name} failed: {str(e)}"
-                
-        # Valid session provided
-        result = mock_artifact_operation("upload_file", session_id="test-session")
-        assert "succeeded" in result
-        assert "test-session" in result
-        
-        # Session from context
-        set_session_context("context-session")
-        result = mock_artifact_operation("write_file")
-        assert "succeeded" in result
-        assert "context-session" in result
-        
-        # No session available
-        clear_session_context()
-        result = mock_artifact_operation("read_file")
-        assert "failed" in result
-        assert "requires a valid session_id" in result
+    @pytest.mark.asyncio
+    async def test_tool_session_workflow(self, session_manager):
+        """Test a complete tool workflow with sessions."""
+        @session_required
+        async def upload_file(filename: str, content: str):
+            session_id = require_session()
+            # Simulate file upload
+            await session_manager.update_session_metadata(
+                session_id, {
+                    "last_upload": filename,
+                    "upload_count": 1
+                }
+            )
+            return f"Uploaded {filename} in session {session_id}"
+            
+        @session_required
+        async def list_files():
+            session_id = require_session()
+            info = await session_manager.get_session_info(session_id)
+            last_upload = info["custom_metadata"].get("last_upload", "none")
+            return f"Last upload in session {session_id}: {last_upload}"
+            
+        # Test the workflow
+        async with SessionContext(session_manager, user_id="test_user") as session_id:
+            # Upload a file
+            result1 = await upload_file("test.txt", "content")
+            assert "Uploaded test.txt" in result1
+            assert session_id in result1
+            
+            # List files
+            result2 = await list_files()
+            assert "test.txt" in result2
+            assert session_id in result2
 
-class TestSessionLifecycle:
-    """Test complete session lifecycle scenarios."""
+class TestRealSessionManager:
+    """Test with real chuk-sessions SessionManager."""
     
     @pytest.mark.asyncio
-    async def test_session_creation_and_cleanup_flow(self, mock_session_manager):
-        """Test a complete session lifecycle from creation to cleanup."""
-        # Start with no session
-        clear_session_context()
-        assert get_session_context() is None
+    async def test_real_session_operations(self, real_session_manager):
+        """Test operations with real session manager."""
+        # Create session
+        session_id = await real_session_manager.create_session(
+            user_id="real_user",
+            metadata={"test": "data"}
+        )
         
-        # Create and set session
-        session_id = "lifecycle-test-session"
-        set_session_context(session_id)
-        assert get_session_context() == session_id
+        # Validate it exists
+        is_valid = await real_session_manager.validate_session(session_id)
+        assert is_valid is True
         
-        # Add session data
-        set_session_data(session_id, "user_id", "user123")
-        set_session_data(session_id, "workspace", "test-workspace")
+        # Update metadata
+        success = await real_session_manager.update_session_metadata(
+            session_id, {"updated": True}
+        )
+        assert success is True
         
-        # Allow async operations to complete
-        await asyncio.sleep(0.01)
+        # Get session info
+        info = await real_session_manager.get_session_info(session_id)
+        assert info is not None
+        assert info["user_id"] == "real_user"
+        assert info["custom_metadata"]["test"] == "data"
+        assert info["custom_metadata"]["updated"] is True
         
-        # Verify data is accessible (these should be in local store now)
-        assert get_session_data(session_id, "user_id") == "user123"
-        assert get_session_data(session_id, "workspace") == "test-workspace"
-        
-        # Session should be listed
-        sessions = list_sessions()
-        assert session_id in sessions
-        
-        # Clean up session
-        clear_session_data(session_id)
-        clear_session_context()
-        
-        # Verify cleanup
-        assert get_session_context() is None
-        
-        # Test that data is gone - suppress warnings for async fallback attempt
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            result = get_session_data(session_id, "user_id", "not_found")
-            assert result == "not_found"
-        
-    def test_session_parameter_validation_scenarios(self):
-        """Test various session parameter validation scenarios."""
-        # Test operation names in error messages
-        operations = ["upload_file", "write_file", "read_file", "delete_file"]
-        
-        for operation in operations:
-            with pytest.raises(ValueError, match=f"Operation '{operation}' requires"):
-                validate_session_parameter(None, operation)
-                
-        # Test with valid session
-        for operation in operations:
-            result = validate_session_parameter("valid-session", operation)
-            assert result == "valid-session"
-            
-    def test_multiple_session_contexts(self):
-        """Test handling multiple session contexts in sequence."""
-        sessions = ["session-1", "session-2", "session-3"]
-        
-        for session_id in sessions:
-            set_session_context(session_id)
-            assert get_session_context() == session_id
-            
-            # Set unique data for each session
-            _session_store[session_id] = {"data": f"data-for-{session_id}"}
-            
-        # Verify each session has its data
-        for session_id in sessions:
-            expected_data = f"data-for-{session_id}"
-            assert get_session_data(session_id, "data") == expected_data
-    """Test error handling in session management."""
-    
-    def test_session_error_inheritance(self):
-        """Test that SessionError is properly defined."""
-        error = SessionError("test message")
-        assert isinstance(error, Exception)
-        assert str(error) == "test message"
-        
-    @pytest.mark.asyncio
-    async def test_session_data_with_async_manager_error(self, mock_session_manager):
-        """Test handling of async manager errors."""
-        # Mock an error in the session manager
-        async def failing_update(*args, **kwargs):
-            raise Exception("Manager error")
-            
-        mock_session_manager.update_session_metadata = failing_update
-        
-        # Should not raise exception, just log and continue
-        # Use direct store access to avoid async task issues in test
-        session_id = "test-session"
-        _session_store[session_id] = {"key": "value"}
-        
-        # Data should be in local store
-        assert get_session_data(session_id, "key") == "value"
-        
-    def test_context_variable_edge_cases(self):
-        """Test edge cases with context variables."""
-        # Multiple set operations
-        set_session_context("session1")
-        set_session_context("session2")
-        assert get_session_context() == "session2"
-        
-        # Clear multiple times
-        clear_session_context()
-        clear_session_context()
-        assert get_session_context() is None
-        
-    @pytest.mark.asyncio
-    async def test_async_task_creation_in_context(self):
-        """Test that async task creation works properly in async context."""
-        session_id = "async-test-session"
-        
-        # This should work without errors in async context
-        set_session_data(session_id, "async_key", "async_value")
-        
-        # Allow the async task to complete
-        await asyncio.sleep(0.01)
-        
-        # Verify data was set
-        assert get_session_data(session_id, "async_key") == "async_value"
+        # Clean up
+        deleted = await real_session_manager.delete_session(session_id)
+        assert deleted is True
 
 if __name__ == "__main__":
     # Configure pytest to run with asyncio support

@@ -2,8 +2,8 @@
 """
 CHUK MCP Server
 
-* automatic session-ID injection for artifact tools
-* optional bearer-token auth middleware
+* automatic session-ID injection for artifact tools via native session management
+* optional bearer-token auth middleware  
 * transparent chuk_artifacts integration
 * global **and per-tool** timeout support
 * end-to-end **token streaming** for async-generator tools
@@ -21,8 +21,8 @@ import time
 import uuid
 from inspect import (
     iscoroutinefunction,
-    isasyncgenfunction,   # <-- NEW
-    isasyncgen,          # <-- NEW
+    isasyncgenfunction,
+    isasyncgen,
 )
 from typing import Any, Callable, Dict, List, Optional, Union, AsyncIterator
 
@@ -51,21 +51,18 @@ from chuk_mcp_runtime.common.tool_naming import resolve_tool_name, update_naming
 from chuk_mcp_runtime.common.verify_credentials import validate_token
 from chuk_mcp_runtime.server.logging_config import get_logger
 from chuk_mcp_runtime.server.event_store import InMemoryEventStore
-from chuk_mcp_runtime.session.session_management import (
-    SessionError,
-    clear_session_context,
-    get_session_context,
-    set_session_context,
+from chuk_mcp_runtime.session.native_session_management import (
+    MCPSessionManager,
+    SessionContext,
+    with_session_auto_inject,
+    create_mcp_session_manager,
+    require_session,
+    get_session_or_none,
+    SessionError
 )
 
-# ─────────────────────────── Optional chuk_artifacts ──────────────────────────
-try:
-    from chuk_artifacts import ArtifactStore
-
-    CHUK_ARTIFACTS_AVAILABLE = True
-except ImportError:  # pragma: no cover
-    CHUK_ARTIFACTS_AVAILABLE = False
-    ArtifactStore = None  # type: ignore
+# ─────────────────────────── chuk_artifacts integration ──────────────────────
+from chuk_artifacts import ArtifactStore
 
 # ------------------------------------------------------------------------------
 # JSON Concatenation Fix Utilities
@@ -186,11 +183,7 @@ _ARTIFACT_RX = re.compile(
 
 
 class MCPServer:
-    """Central MCP server with session & artifact-store support."""
-
-    # ------------------------------------------------------------------ #
-    # Construction & helpers                                             #
-    # ------------------------------------------------------------------ #
+    """Central MCP server with native session & artifact-store support."""
 
     def __init__(
         self,
@@ -202,7 +195,11 @@ class MCPServer:
 
         self.server_name = config.get("host", {}).get("name", "generic-mcp")
         self.tools_registry = tools_registry or TOOLS_REGISTRY
-        self.current_session: Optional[str] = None
+        
+        # Native session management
+        self.session_manager = create_mcp_session_manager(config)
+        
+        # Artifact store
         self.artifact_store: Optional[ArtifactStore] = None
 
         # Tool timeout configuration
@@ -210,10 +207,6 @@ class MCPServer:
         self.logger.debug("Tool timeout configured: %.1fs (global default)", self.tool_timeout)
 
         update_naming_maps()  # make sure resolve_tool_name works
-
-    # ..........................................................................
-    # timeout helpers
-    # ..........................................................................
 
     def _get_tool_timeout(self) -> float:
         """Pick global timeout from config/env with sane fall-back."""
@@ -232,15 +225,8 @@ class MCPServer:
                     continue
         return 60.0
 
-    # ..........................................................................
-    # artifact store (unchanged)
-    # ..........................................................................
-
     async def _setup_artifact_store(self) -> None:
-        if not CHUK_ARTIFACTS_AVAILABLE:
-            self.logger.info("chuk_artifacts not installed - file tools disabled")
-            return
-
+        """Setup the artifact store with native session management."""
         cfg = self.config.get("artifacts", {})
         storage = cfg.get(
             "storage_provider", os.getenv("ARTIFACT_STORAGE_PROVIDER", "filesystem")
@@ -275,11 +261,12 @@ class MCPServer:
                 self.logger.debug("Artifact store ready: %s/%s → %s", storage, session, bucket)
             else:
                 self.logger.warning("Artifact-store config issues: %s", status)
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:
             self.logger.error("Artifact-store init failed: %s", exc)
             self.artifact_store = None
 
     async def _import_tools_registry(self) -> Dict[str, Callable]:
+        """Import tools registry from configuration."""
         mod = self.config.get("tools", {}).get(
             "registry_module", "chuk_mcp_runtime.common.mcp_tool_decorator"
         )
@@ -297,32 +284,21 @@ class MCPServer:
         update_naming_maps()
         return registry
 
-    # ------------------------------------------------------------------ #
-    # Session helpers                                                    #
-    # ------------------------------------------------------------------ #
-
     async def _inject_session_context(
         self, tool_name: str, args: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Auto-add `session_id` for artifact helpers."""
-        if _ARTIFACT_RX.search(tool_name) and "session_id" not in args:
-            if not self.current_session:
-                self.current_session = (
-                    f"mcp-session-{int(time.time())}-{uuid.uuid4().hex[:8]}"
-                )
-                self.logger.info("Auto-created session: %s", self.current_session)
-            args = {**args, "session_id": self.current_session}
-        return args
-
-    # ------------------------------------------------------------------ #
-    # Tool execution with timeout & streaming                            #
-    # ------------------------------------------------------------------ #
+        """Auto-inject session context using native session manager."""
+        return await with_session_auto_inject(
+            self.session_manager, 
+            tool_name, 
+            args
+        )
 
     async def _execute_tool_with_timeout(
         self, func: Callable, tool_name: str, arguments: Dict[str, Any]
     ) -> Any:
         """
-        Execute a tool.
+        Execute a tool with timeout support.
 
         * Coroutine tools → awaited with asyncio.wait_for()
         * Async-generator tools → streamed, still respecting timeout
@@ -353,12 +329,8 @@ class MCPServer:
         except asyncio.TimeoutError:
             raise ValueError(f"Tool '{tool_name}' timed out after {timeout:.1f}s")
 
-    # ------------------------------------------------------------------ #
-    # Public API                                                         #
-    # ------------------------------------------------------------------ #
-
     async def serve(self, custom_handlers: Optional[Dict[str, Callable]] = None) -> None:
-        """Boot the MCP server (stdio or SSE) and serve forever."""
+        """Boot the MCP server and serve forever."""
         await self._setup_artifact_store()
 
         if not self.tools_registry:
@@ -370,7 +342,6 @@ class MCPServer:
         server = Server(self.server_name)
 
         # ----------------------------- list_tools ----------------------------- #
-
         @server.list_tools()
         async def list_tools() -> List[Tool]:
             """List available tools with robust error handling."""
@@ -402,9 +373,6 @@ class MCPServer:
                 
             except Exception as e:
                 self.logger.error("Error in list_tools: %s", e)
-                import traceback
-                self.logger.error("Full traceback: %s", traceback.format_exc())
-                # Return empty list rather than crashing
                 return []
 
         # ----------------------------- call_tool ----------------------------- #
@@ -412,139 +380,121 @@ class MCPServer:
         async def call_tool(
             name: str, arguments: Dict[str, Any]
         ) -> List[Union[TextContent, ImageContent, EmbeddedResource]]:
-            """Execute a tool with JSON concatenation fixing and streaming workaround."""
+            """Execute a tool with native session management."""
             try:
-                # Fix concatenated JSON in arguments FIRST
+                # Fix concatenated JSON in arguments
                 original_args = arguments
                 if arguments:
                     if isinstance(arguments, (str, dict)):
                         arguments = parse_tool_arguments(arguments)
                         
-                        # Log if we had to fix anything
                         if arguments != original_args:
                             self.logger.info("Fixed concatenated JSON arguments for '%s': %s -> %s", 
                                            name, original_args, arguments)
 
                 self.logger.debug("call_tool called with name='%s', arguments=%s", name, arguments)
-                registry = self.tools_registry
-
-                # ── name resolution ───────────────────────────────────────────────
-                resolved = name if name in registry else resolve_tool_name(name)
-                if resolved not in registry:
+                
+                # Tool name resolution
+                resolved = name if name in self.tools_registry else resolve_tool_name(name)
+                if resolved not in self.tools_registry:
                     matches = [
-                        k
-                        for k in registry
+                        k for k in self.tools_registry
                         if k.endswith(f"_{name}") or k.endswith(f".{name}")
                     ]
                     if len(matches) == 1:
                         resolved = matches[0]
-                if resolved not in registry:
+                        
+                if resolved not in self.tools_registry:
                     raise ValueError(f"Tool not found: {name}")
 
-                func = registry[resolved]
+                func = self.tools_registry[resolved]
                 self.logger.debug("Resolved tool '%s' to function: %s", name, func)
 
-                # ── auto-inject session_id for artifact helpers ──────────────────
+                # Native session injection
                 arguments = await self._inject_session_context(resolved, arguments)
-                is_artifact_tool = _ARTIFACT_RX.search(resolved) is not None
 
-                # ── execute (with timeout / streaming) ───────────────────────────
-                if self.current_session:
-                    set_session_context(self.current_session)
-
-                self.logger.debug("About to execute tool '%s'", resolved)
-                result = await self._execute_tool_with_timeout(func, resolved, arguments)
-                self.logger.debug("Tool execution completed, result type: %s", type(result))
-
-                # Did the tool change the session?
-                new_ctx = get_session_context()
-                if new_ctx and new_ctx != self.current_session:
-                    self.current_session = new_ctx
-
-                # ── streaming path: collect all chunks to work around MCP library bug ────────────────────
-                if isasyncgen(result):
-                    self.logger.debug("Tool returned async generator, collecting all chunks for '%s'", resolved)
+                # Execute within session context  
+                async with SessionContext(
+                    self.session_manager, 
+                    session_id=arguments.get("session_id"),
+                    auto_create=True
+                ) as session_id:
                     
-                    collected_chunks = []
-                    chunk_count = 0
+                    self.logger.debug("Executing tool '%s' in session %s", resolved, session_id)
+                    result = await self._execute_tool_with_timeout(func, resolved, arguments)
+                    self.logger.debug("Tool execution completed, result type: %s", type(result))
+
+                    # Handle streaming results
+                    if isasyncgen(result):
+                        self.logger.debug("Tool returned async generator, collecting chunks for '%s'", resolved)
+                        
+                        collected_chunks = []
+                        chunk_count = 0
+                        
+                        try:
+                            async for part in result:
+                                chunk_count += 1
+                                self.logger.debug("Collecting streaming chunk %d for '%s'", chunk_count, resolved)
+                                
+                                if isinstance(part, (TextContent, ImageContent, EmbeddedResource)):
+                                    collected_chunks.append(part)
+                                elif isinstance(part, str):
+                                    collected_chunks.append(TextContent(type="text", text=part))
+                                elif isinstance(part, dict) and "delta" in part:
+                                    collected_chunks.append(TextContent(type="text", text=part["delta"]))
+                                else:
+                                    collected_chunks.append(TextContent(
+                                        type="text", text=json.dumps(part, ensure_ascii=False)
+                                    ))
+                            
+                            return collected_chunks if collected_chunks else [
+                                TextContent(type="text", text="No output from streaming tool")
+                            ]
+                            
+                        except Exception as e:
+                            self.logger.error("Error collecting streaming chunks for '%s': %s", resolved, e)
+                            return [TextContent(type="text", text=f"Streaming error: {str(e)}")]
+
+                    # Handle regular results
+                    self.logger.debug("Tool returned non-streaming result for '%s'", resolved)
                     
-                    try:
-                        async for part in result:
-                            chunk_count += 1
-                            self.logger.debug("Collecting streaming chunk %d for '%s': %s", chunk_count, resolved, part)
-                            
-                            # Convert to TextContent
-                            if isinstance(part, (TextContent, ImageContent, EmbeddedResource)):
-                                collected_chunks.append(part)
-                            elif isinstance(part, str):
-                                collected_chunks.append(TextContent(type="text", text=part))
-                            elif isinstance(part, dict) and "delta" in part:
-                                collected_chunks.append(TextContent(type="text", text=part["delta"]))
-                            else:
-                                collected_chunks.append(TextContent(
-                                    type="text", text=json.dumps(part, ensure_ascii=False)
-                                ))
-                        
-                        self.logger.debug("Collected %d chunks for '%s'", chunk_count, resolved)
-                        
-                        # Return all chunks as a single response
-                        if collected_chunks:
-                            return collected_chunks
-                        else:
-                            return [TextContent(type="text", text="No output from streaming tool")]
-                            
-                    except Exception as e:
-                        self.logger.error("Error collecting streaming chunks for '%s': %s", resolved, e)
-                        return [TextContent(type="text", text=f"Streaming error: {str(e)}")]
+                    # Format artifact tool results
+                    if _ARTIFACT_RX.search(resolved):
+                        if isinstance(result, dict) and not ("content" in result and "isError" in result):
+                            result = {
+                                "session_id": session_id,
+                                "content": result,
+                                "isError": False,
+                            }
+                        elif isinstance(result, str):
+                            result = {
+                                "session_id": session_id,
+                                "content": result,
+                                "isError": False,
+                            }
 
-                # ── non-streaming path (finish like before) ───────────────────────
-                self.logger.debug("Tool returned non-streaming result for '%s'", resolved)
-                
-                if is_artifact_tool:
-                    wrapped = (
-                        {**result, "session_id": self.current_session}
-                        if isinstance(result, dict)
-                        and "content" in result
-                        and "isError" in result
-                        else {
-                            "session_id": self.current_session,
-                            "content": result,
-                            "isError": False,
-                        }
-                    )
-                    result = wrapped
-
-                if (
-                    isinstance(result, list)
-                    and all(
-                        isinstance(r, (TextContent, ImageContent, EmbeddedResource))
-                        for r in result
-                    )
-                ):
-                    return result
-
-                if isinstance(result, str):
-                    return [TextContent(type="text", text=result)]
-
-                # everything else → JSON string
-                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+                    # Format response
+                    if isinstance(result, list) and all(
+                        isinstance(r, (TextContent, ImageContent, EmbeddedResource)) for r in result
+                    ):
+                        return result
+                    elif isinstance(result, str):
+                        return [TextContent(type="text", text=result)]
+                    else:
+                        return [TextContent(type="text", text=json.dumps(result, indent=2))]
                 
             except Exception as e:
                 self.logger.error("Error in call_tool for '%s': %s", name, e)
-                import traceback
-                self.logger.error("Full traceback: %s", traceback.format_exc())
                 return [TextContent(type="text", text=f"Tool execution error: {str(e)}")]
-                
+
         # ------------------------------------------------------------------ #
-        # transport bootstrapping (stdio / SSE)                             #
+        # Transport bootstrapping (stdio / SSE / StreamableHTTP)            #
         # ------------------------------------------------------------------ #
         opts = server.create_initialization_options()
         mode = self.config.get("server", {}).get("type", "stdio")
 
         if mode == "stdio":
-            self.logger.info(
-                "Starting MCP (stdio) - global timeout %.1fs …", self.tool_timeout
-            )
+            self.logger.info("Starting MCP (stdio) - global timeout %.1fs", self.tool_timeout)
             async with stdio_server() as (r, w):
                 await server.run(r, w, opts)
 
@@ -578,12 +528,7 @@ class MCPServer:
                     )
                 ],
             )
-            self.logger.info(
-                "Starting MCP (SSE) on %s:%s - global timeout %.1fs …",
-                host,
-                port,
-                self.tool_timeout,
-            )
+            self.logger.info("Starting MCP (SSE) on %s:%s - global timeout %.1fs", host, port, self.tool_timeout)
             await uvicorn.Server(
                 uvicorn.Config(app, host=host, port=port, log_level="info")
             ).serve()
@@ -599,17 +544,16 @@ class MCPServer:
             json_response = streamhttp_config.get("json_response", True)
             stateless = streamhttp_config.get("stateless", True)
 
-            if stateless:
-                event_store=None
-            else:
-                event_store = InMemoryEventStore()
+            event_store = None if stateless else InMemoryEventStore()
+            
             # Create the session manager with our app and event store
             session_manager = StreamableHTTPSessionManager(
                 app=server,
-                event_store=event_store,  # Enable resumability
+                event_store=event_store,
                 stateless=stateless,
                 json_response=json_response,
             )
+            
             async def handle_streamable_http(scope: Scope, receive: Receive, send: Send) -> Response:
                 await session_manager.handle_request(scope, receive, send)
                 return Response()
@@ -641,27 +585,19 @@ class MCPServer:
                 lifespan=lifespan,
             )
 
-            import uvicorn
-
-            self.logger.info(
-                "Starting MCP (StreamableHTTP) on %s:%s - global timeout %.1fs …",
-                host,
-                port,
-                self.tool_timeout,
-            )
+            self.logger.info("Starting MCP (StreamableHTTP) on %s:%s - global timeout %.1fs", host, port, self.tool_timeout)
             await uvicorn.Server(
                 uvicorn.Config(app, host=host, port=port, log_level="info")
             ).serve()
         else:
             raise ValueError(f"Unknown server type: {mode}")
 
-        
-
     # ------------------------------------------------------------------ #
-    # Misc administrative helpers                                        #
+    # Administrative helpers                                             #
     # ------------------------------------------------------------------ #
 
     async def register_tool(self, name: str, func: Callable) -> None:
+        """Register a tool in the registry."""
         if not hasattr(func, "_mcp_tool"):
             self.logger.warning("Function %s lacks _mcp_tool metadata", func.__name__)
             return
@@ -669,23 +605,33 @@ class MCPServer:
         update_naming_maps()
 
     async def get_tool_names(self) -> List[str]:
+        """Get list of registered tool names."""
         return list(self.tools_registry)
 
-    # session getters / setters -----------------------------------------
+    # Session management helpers
+    def get_session_manager(self) -> MCPSessionManager:
+        """Get the session manager instance."""
+        return self.session_manager
 
-    def set_session(self, session_id: str) -> None:
-        self.current_session = session_id
-        set_session_context(session_id)
-
-    def get_current_session(self) -> Optional[str]:
-        return self.current_session
+    async def create_user_session(
+        self, 
+        user_id: str, 
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """Create a new user session."""
+        return await self.session_manager.create_session(
+            user_id=user_id,
+            metadata=metadata
+        )
 
     def get_artifact_store(self) -> Optional[ArtifactStore]:
+        """Get the artifact store instance."""
         return self.artifact_store
 
     async def close(self) -> None:
+        """Clean shutdown."""
         if self.artifact_store:
             try:
                 await self.artifact_store.close()
-            except Exception as exc:  # pragma: no cover
+            except Exception as exc:
                 self.logger.warning("Error closing artifact store: %s", exc)
