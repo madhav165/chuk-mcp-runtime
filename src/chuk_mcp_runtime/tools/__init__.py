@@ -57,8 +57,7 @@ except ImportError:  # chuk_artifacts (or its wrapper) missing
             "disabled_tools": [],
             "total_tools": 0,
             "enabled_count": 0,
-            "config": {},
-            "install_command": "pip install chuk-artifacts",
+            "config": {}
         }
 
     def get_enabled_artifact_tools() -> List[str]:  # noqa: D401

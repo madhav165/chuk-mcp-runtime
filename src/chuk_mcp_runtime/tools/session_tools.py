@@ -324,7 +324,7 @@ async def register_session_tools(config: Dict[str, Any] | None = None) -> bool:
     sess_cfg = (config or {}).get("session_tools", {})
     if not sess_cfg.get("enabled", False):
         prune_all()
-        logger.info("session_tools disabled – nothing registered")
+        logger.debug("session_tools disabled - nothing registered")
         return False
 
     # Which helpers are individually enabled?

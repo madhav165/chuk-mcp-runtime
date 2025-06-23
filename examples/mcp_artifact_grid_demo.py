@@ -8,7 +8,7 @@ chuk_mcp_runtime.artifacts wrapper** (so any existing MCP code keeps
 working without touching chuk_artifacts directly).
 
 • Works with either in-memory / filesystem back-ends or a real S3/MinIO
-  bucket – decided entirely by your environment variables.
+  bucket - decided entirely by your environment variables.
 
 Relevant env vars
 ─────────────────
@@ -97,7 +97,7 @@ async def main() -> None:
     # ------------------------------------------------------------------ presign URLs
     heading("🔑  PRESIGNED URL CHECK")
     short_url = await store.presign_short(txt_id)
-    # only meaningful for S3/MinIO – but print regardless
+    # only meaningful for S3/MinIO - but print regardless
     print("short URL  :", short_url)
 
     # try to extract the object-key part out of the URL for a match check

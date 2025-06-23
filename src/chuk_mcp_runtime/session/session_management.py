@@ -33,7 +33,7 @@ _session_store: Dict[str, Dict[str, Any]] = {}
 
 
 # ---------------------------------------------------------------------
-#  INTERNAL helper – lazy import to break circular dependency           
+#  INTERNAL helper - lazy import to break circular dependency           
 # ---------------------------------------------------------------------
 
 def _mgr():  # noqa: D401

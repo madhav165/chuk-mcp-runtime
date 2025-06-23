@@ -207,7 +207,7 @@ class MCPServer:
 
         # Tool timeout configuration
         self.tool_timeout = self._get_tool_timeout()
-        self.logger.info("Tool timeout configured: %.1fs (global default)", self.tool_timeout)
+        self.logger.debug("Tool timeout configured: %.1fs (global default)", self.tool_timeout)
 
         update_naming_maps()  # make sure resolve_tool_name works
 
@@ -238,7 +238,7 @@ class MCPServer:
 
     async def _setup_artifact_store(self) -> None:
         if not CHUK_ARTIFACTS_AVAILABLE:
-            self.logger.info("chuk_artifacts not installed – file tools disabled")
+            self.logger.info("chuk_artifacts not installed - file tools disabled")
             return
 
         cfg = self.config.get("artifacts", {})
@@ -272,7 +272,7 @@ class MCPServer:
                 status["session"]["status"] == "ok"
                 and status["storage"]["status"] == "ok"
             ):
-                self.logger.info("Artifact store ready: %s/%s → %s", storage, session, bucket)
+                self.logger.debug("Artifact store ready: %s/%s → %s", storage, session, bucket)
             else:
                 self.logger.warning("Artifact-store config issues: %s", status)
         except Exception as exc:  # pragma: no cover
@@ -375,7 +375,7 @@ class MCPServer:
         async def list_tools() -> List[Tool]:
             """List available tools with robust error handling."""
             try:
-                self.logger.info("list_tools called – %d tools total", len(self.tools_registry))
+                self.logger.info("list_tools called - %d tools total", len(self.tools_registry))
                 
                 tools = []
                 for tool_name, func in self.tools_registry.items():
@@ -543,7 +543,7 @@ class MCPServer:
 
         if mode == "stdio":
             self.logger.info(
-                "Starting MCP (stdio) – global timeout %.1fs …", self.tool_timeout
+                "Starting MCP (stdio) - global timeout %.1fs …", self.tool_timeout
             )
             async with stdio_server() as (r, w):
                 await server.run(r, w, opts)
@@ -579,7 +579,7 @@ class MCPServer:
                 ],
             )
             self.logger.info(
-                "Starting MCP (SSE) on %s:%s – global timeout %.1fs …",
+                "Starting MCP (SSE) on %s:%s - global timeout %.1fs …",
                 host,
                 port,
                 self.tool_timeout,
@@ -644,7 +644,7 @@ class MCPServer:
             import uvicorn
 
             self.logger.info(
-                "Starting MCP (StreamableHTTP) on %s:%s – global timeout %.1fs …",
+                "Starting MCP (StreamableHTTP) on %s:%s - global timeout %.1fs …",
                 host,
                 port,
                 self.tool_timeout,

@@ -130,7 +130,7 @@ async def _enable_artifact_tools(cfg_extra: Dict[str, Any]) -> None:
 
 # ───────────────────────── integration smoke test ─────────────────────────
 
-async def test_basic_integration() -> bool:  # noqa: C901 – (complexity acceptable here)
+async def test_basic_integration() -> bool:  # noqa: C901 - (complexity acceptable here)
     """End‑to‑end exercise of write/read etc. now that tools are enabled."""
     print("\n🔬 Basic Integration Test")
     print("=" * 28)

@@ -12,9 +12,9 @@ Visual proof that sandbox IDs propagate correctly through
 
 Three independent scenarios:
 
-1. Explicit      – pass `sandbox_id=` directly to ArtifactStore
-2. Env-variable  – set SANDBOX_ID / ARTIFACT_SANDBOX_ID
-3. Fallback      – remove vars so auto-generation is used
+1. Explicit      - pass `sandbox_id=` directly to ArtifactStore
+2. Env-variable  - set SANDBOX_ID / ARTIFACT_SANDBOX_ID
+3. Fallback      - remove vars so auto-generation is used
 
 Run from the project root:
 
@@ -127,7 +127,7 @@ async def main() -> None:
         env_var=None,
     )
 
-    print("\n✅  Demo completed – sandbox namespaces propagate correctly!\n")
+    print("\n✅  Demo completed - sandbox namespaces propagate correctly!\n")
 
 
 if __name__ == "__main__":

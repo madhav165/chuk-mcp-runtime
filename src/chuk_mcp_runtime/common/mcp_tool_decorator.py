@@ -232,7 +232,7 @@ def mcp_tool(
             
             wrapper = async_wrapper
 
-        # attach bookkeeping – schema & Tool will be added later
+        # attach bookkeeping - schema & Tool will be added later
         wrapper._needs_init = True
         wrapper._init_name = tool_name
         wrapper._init_desc = tool_desc

@@ -5,33 +5,19 @@ Configurable MCP Tools Integration for chuk_artifacts
 This module provides configurable MCP tools that can be enabled/disabled
 and customized via config.yaml settings.
 """
-
 import os
 import json
 import base64
 from typing import List, Dict, Any, Optional, Union, Set
 from datetime import datetime
 
+# runtime
+from chuk_artifacts import ArtifactStore, ArtifactNotFoundError
 from chuk_mcp_runtime.common.mcp_tool_decorator import mcp_tool, TOOLS_REGISTRY
-from chuk_mcp_runtime.session.session_management import (
-    get_effective_session_id,
-    validate_session_parameter
-)
+from chuk_mcp_runtime.session.session_management import validate_session_parameter
 from chuk_mcp_runtime.server.logging_config import get_logger
 
-# Import chuk_artifacts with graceful fallback
-try:
-    from chuk_artifacts import ArtifactStore, ArtifactNotFoundError
-    CHUK_ARTIFACTS_AVAILABLE = True
-except ImportError:
-    CHUK_ARTIFACTS_AVAILABLE = False
-    
-    class ArtifactStore:
-        pass
-    
-    class ArtifactNotFoundError(Exception):
-        pass
-
+# logger
 logger = get_logger("chuk_mcp_runtime.tools.artifacts")
 
 # Global artifact store instance and configuration
@@ -69,10 +55,7 @@ def configure_artifacts_tools(config: Dict[str, Any]) -> None:
     # Determine which tools are enabled
     _enabled_tools.clear()
     
-    if not CHUK_ARTIFACTS_AVAILABLE:
-        logger.warning("chuk_artifacts not available - artifact tools disabled")
-        return
-    
+    # check if tools are enabled
     if not tools_config.get("enabled", True):
         logger.info("Artifact tools disabled in configuration")
         return
@@ -80,6 +63,7 @@ def configure_artifacts_tools(config: Dict[str, Any]) -> None:
     # Process individual tool configuration
     tool_settings = tools_config.get("tools", DEFAULT_TOOL_CONFIG["tools"])
     
+    # loop through each tool and see if we should enable it
     for tool_name, tool_config in tool_settings.items():
         if tool_config.get("enabled", True):
             _enabled_tools.add(tool_name)
@@ -87,6 +71,7 @@ def configure_artifacts_tools(config: Dict[str, Any]) -> None:
         else:
             logger.debug(f"Disabled artifact tool: {tool_name}")
     
+    # log it
     logger.info(f"Configured {len(_enabled_tools)} artifact tools: {', '.join(sorted(_enabled_tools))}")
 
 
@@ -98,9 +83,6 @@ def is_tool_enabled(tool_name: str) -> bool:
 async def get_artifact_store() -> ArtifactStore:
     """Get or create the global artifact store instance."""
     global _artifact_store
-    
-    if not CHUK_ARTIFACTS_AVAILABLE:
-        raise ImportError("chuk_artifacts package not available. Install with: pip install chuk-artifacts")
     
     if _artifact_store is None:
         # Use configuration or environment variables or sensible defaults
@@ -139,11 +121,7 @@ async def get_artifact_store() -> ArtifactStore:
 
 def _check_availability():
     """Check if chuk_artifacts is available and raise helpful error if not."""
-    if not CHUK_ARTIFACTS_AVAILABLE:
-        raise ValueError(
-            "chuk_artifacts package not available. "
-            "Install with: pip install chuk-artifacts"
-        )
+    return True
 
 
 def _check_tool_enabled(tool_name: str):
@@ -179,7 +157,6 @@ async def upload_file(
     Returns:
         Success message with artifact ID
     """
-    _check_availability()
     _check_tool_enabled("upload_file")
     effective_session = validate_session_parameter(session_id, "upload_file")
     store = await get_artifact_store()
@@ -230,7 +207,6 @@ async def write_file(
     Returns:
         Success message with artifact ID
     """
-    _check_availability()
     _check_tool_enabled("write_file")
     effective_session = validate_session_parameter(session_id, "write_file")
     store = await get_artifact_store()
@@ -274,7 +250,6 @@ async def read_file(
     Returns:
         File content as text, or dictionary with content and metadata if as_text=False
     """
-    _check_availability()
     _check_tool_enabled("read_file")
     effective_session = validate_session_parameter(session_id, "read_file")
     store = await get_artifact_store()
@@ -316,7 +291,6 @@ async def list_session_files(
     Returns:
         List of files in the session with basic or full metadata
     """
-    _check_availability()
     _check_tool_enabled("list_session_files")
     effective_session = validate_session_parameter(session_id, "list_session_files")
     store = await get_artifact_store()
@@ -358,7 +332,6 @@ async def delete_file(
     Returns:
         Success or failure message
     """
-    _check_availability()
     _check_tool_enabled("delete_file")
     effective_session = validate_session_parameter(session_id, "delete_file")
     store = await get_artifact_store()
@@ -390,7 +363,6 @@ async def list_directory(
     Returns:
         List of files in the specified directory
     """
-    _check_availability()
     _check_tool_enabled("list_directory")
     effective_session = validate_session_parameter(session_id, "list_directory")
     store = await get_artifact_store()
@@ -434,7 +406,6 @@ async def copy_file(
     Returns:
         Success message with new artifact ID
     """
-    _check_availability()
     _check_tool_enabled("copy_file")
     effective_session = validate_session_parameter(session_id, "copy_file")
     store = await get_artifact_store()
@@ -481,7 +452,6 @@ async def move_file(
     Returns:
         Success message confirming the move
     """
-    _check_availability()
     _check_tool_enabled("move_file")
     effective_session = validate_session_parameter(session_id, "move_file")
     store = await get_artifact_store()
@@ -520,7 +490,6 @@ async def get_file_metadata(
     Returns:
         Dictionary containing file metadata (size, type, creation date, etc.)
     """
-    _check_availability()
     _check_tool_enabled("get_file_metadata")
     effective_session = validate_session_parameter(session_id, "get_file_metadata")
     store = await get_artifact_store()
@@ -552,7 +521,6 @@ async def get_presigned_url(
     Returns:
         Presigned URL for downloading the file
     """
-    _check_availability()
     _check_tool_enabled("get_presigned_url")
     effective_session = validate_session_parameter(session_id, "get_presigned_url")
     store = await get_artifact_store()
@@ -586,7 +554,6 @@ async def get_storage_stats(
     Returns:
         Dictionary with storage statistics including file count and total bytes
     """
-    _check_availability()
     _check_tool_enabled("get_storage_stats")
     effective_session = validate_session_parameter(session_id, "get_storage_stats")
     store = await get_artifact_store()
@@ -632,18 +599,11 @@ TOOL_FUNCTIONS = {
 
 async def register_artifacts_tools(config: Dict[str, Any] | None = None) -> bool:
     """Register artifact helpers according to *config*."""
-    # 0) chuk_artifacts available?
-    if not CHUK_ARTIFACTS_AVAILABLE:
-        for t in TOOL_FUNCTIONS:
-            TOOLS_REGISTRY.pop(t, None)
-        logger.info("chuk_artifacts missing – helpers disabled")
-        return False
-
     art_cfg = (config or {}).get("artifacts", {})
     if not art_cfg.get("enabled", False):
         for t in TOOL_FUNCTIONS:
             TOOLS_REGISTRY.pop(t, None)
-        logger.info("artifacts block disabled – no helpers registered")
+        logger.info("artifacts block disabled - no helpers registered")
         return False
 
     enabled_helpers = {
@@ -691,14 +651,13 @@ def get_artifacts_tools_info() -> Dict[str, Any]:
     all_tools = list(DEFAULT_TOOL_CONFIG["tools"].keys())
     
     return {
-        "available": CHUK_ARTIFACTS_AVAILABLE,
+        "available": True,
         "configured": bool(_artifacts_config),
         "enabled_tools": list(_enabled_tools),
         "disabled_tools": [t for t in all_tools if t not in _enabled_tools],
         "total_tools": len(all_tools),
         "enabled_count": len(_enabled_tools),
-        "config": _artifacts_config,
-        "install_command": "pip install chuk-artifacts" if not CHUK_ARTIFACTS_AVAILABLE else None
+        "config": _artifacts_config
     }
 
 

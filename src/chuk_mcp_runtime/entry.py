@@ -1,6 +1,6 @@
 # chuk_mcp_runtime/entry.py
 """
-Entry point for the CHUK MCP Runtime – async-native, proxy-aware,
+Entry point for the CHUK MCP Runtime - async-native, proxy-aware,
 with automatic chuk_artifacts integration.
 """
 from __future__ import annotations
@@ -65,7 +65,7 @@ def _need_proxy(cfg: dict[str, Any]) -> bool:
     return bool(cfg.get("proxy", {}).get("enabled")) and HAS_PROXY_SUPPORT
 
 
-# ───────────────────────── helper – artefact tools iterator ────────────────
+# ───────────────────────── helper - artefact tools iterator ────────────────
 def _iter_tools(container) -> Iterable[Tuple[str, Any]]:
     """Yield *(name, callable)* pairs from whatever get_artifact_tools() returns."""
     from chuk_mcp_runtime.tools import artifacts_tools as _at_mod
@@ -118,17 +118,17 @@ async def run_runtime_async(
     if CHUK_ARTIFACTS_AVAILABLE:
         try:
             await register_artifact_tools(cfg)
-            logger.info("chuk_artifacts tools registered successfully")
+            logger.debug("chuk_artifacts tools registered successfully")
         except Exception as exc:      # pragma: no cover
             logger.warning("Artifact-tool registration failed: %s", exc)
     else:
-        logger.info("chuk_artifacts not available – file tools skipped")
+        logger.debug("chuk_artifacts not available - file tools skipped")
 
     # 4b) session-management wrappers  ←────────────── NEW BLOCK
     if SESSION_TOOLS_AVAILABLE:
         try:
             ok = await register_session_tools(cfg)
-            logger.info(
+            logger.debug(
                 "Session-tool processing complete (%s)",
                 "enabled" if ok else "disabled",
             )
@@ -152,8 +152,8 @@ async def run_runtime_async(
             proxy_mgr = ProxyServerManager(cfg, project_root)
             await proxy_mgr.start_servers()
             if proxy_mgr.running:
-                logger.info(
-                    "Proxy layer enabled – %d server(s) booted",
+                logger.debug(
+                    "Proxy layer enabled - %d server(s) booted",
                     len(proxy_mgr.running),
                 )
         except Exception as exc:      # pragma: no cover
@@ -162,7 +162,7 @@ async def run_runtime_async(
 
     # 7) local MCP server (explicit registry pass-through)
     mcp_server = MCPServer(cfg, tools_registry=TOOLS_REGISTRY)
-    logger.info("Local MCP server '%s' starting",
+    logger.debug("Local MCP server '%s' starting",
                 getattr(mcp_server, "server_name", "local"))
 
     # 7a) log tool count

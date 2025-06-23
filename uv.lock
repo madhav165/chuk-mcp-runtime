@@ -353,6 +353,7 @@ version = "0.5.1"
 source = { editable = "." }
 dependencies = [
     { name = "chuk-artifacts" },
+    { name = "chuk-sessions" },
     { name = "cryptography" },
     { name = "pydantic" },
     { name = "pyjwt" },
@@ -376,6 +377,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "chuk-artifacts", specifier = ">=0.4" },
+    { name = "chuk-sessions", specifier = ">=0.4.2" },
     { name = "cryptography", specifier = ">=44.0.3" },
     { name = "pydantic", specifier = ">=2.10.6" },
     { name = "pyjwt", specifier = ">=2.10.1" },
@@ -394,15 +396,14 @@ dev = [
 
 [[package]]
 name = "chuk-sessions"
-version = "0.3"
+version = "0.4.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
-    { name = "redis" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/dd/f2/aba8f1a52821cdcb8bf08ae2d3170ade01886f9836e7e0a48350426dbec9/chuk_sessions-0.3-py3-none-any.whl", hash = "sha256:220cdf1347cce5900da6a2132ba681e8e4ab16125d6934f53416beb42d10c601", size = 12187 },
+    { url = "https://files.pythonhosted.org/packages/69/5b/95d17807944c922671ac8538c03b1f334c8ce7e473d62ccf3d3bf3833c01/chuk_sessions-0.4.2-py3-none-any.whl", hash = "sha256:aaa49cbd59ec0cb22c9fbfaed99fa28f9fbfeac3c9f54d15242f5ec17deed740", size = 11895 },
 ]
 
 [[package]]

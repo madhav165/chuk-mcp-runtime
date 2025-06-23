@@ -7,9 +7,9 @@ examples/stream_demo.py
 • Streams every token as it arrives from /sse
 
 This is the smallest possible end-to-end demo that:
-   – obeys the JSON-RPC 2.0 shapes (`initialize`, `notifications/initialized`,
+   - obeys the JSON-RPC 2.0 shapes (`initialize`, `notifications/initialized`,
      `tools/call`)
-   – handles the session-ID handshake required by SseServerTransport
+   - handles the session-ID handshake required by SseServerTransport
 """
 
 import asyncio, contextlib, json, os, re, socket, sys, uuid
@@ -77,7 +77,7 @@ async def run_client(prompt: str):
     SSE = "http://127.0.0.1:8111/sse"
     async with httpx.AsyncClient(timeout=60.0) as client:
 
-        # 4A. Connect to /sse – grab the server-issued session ID
+        # 4A. Connect to /sse - grab the server-issued session ID
         session_fut: asyncio.Future[str] = asyncio.Future()
         streaming_done = asyncio.Event()
 
@@ -169,7 +169,7 @@ async def run_client(prompt: str):
         })
         await rpc(None, "notifications/initialized", {})   # notification (id=None)
 
-        # 4D. JSON-RPC tools/call – streaming tool
+        # 4D. JSON-RPC tools/call - streaming tool
         print(f"[DEBUG] Calling tool with prompt: '{prompt}'")
         await rpc(2, "tools/call", {
             "name": "echo_stream",
