@@ -4,6 +4,9 @@ Session Management Tools for CHUK MCP Runtime
 
 This module provides MCP tools for managing session context and state.
 These tools allow clients to manage their session lifecycle directly.
+
+NOTE: These tools are DISABLED by default and must be explicitly enabled
+in configuration to be available.
 """
 
 from typing import Dict, Any, Optional
@@ -11,43 +14,41 @@ from chuk_mcp_runtime.common.mcp_tool_decorator import mcp_tool, TOOLS_REGISTRY
 from chuk_mcp_runtime.session.session_management import (
     get_session_context,
     set_session_context,
-    normalize_session_id,
     clear_session_context,
-    list_sessions,
-    get_session_data,
-    set_session_data,
-    SessionError
+    SessionError,
+    SessionValidationError,
+    validate_session_parameter,
 )
 from chuk_mcp_runtime.server.logging_config import get_logger
 
 logger = get_logger("chuk_mcp_runtime.tools.session")
 
-# Default configuration for session tools
+# FIXED: Default configuration for session tools - DISABLED by default
 DEFAULT_SESSION_TOOLS_CONFIG = {
-    "enabled": False,  # Disabled by default - must be explicitly enabled
+    "enabled": False,  # DISABLED by default - must be explicitly enabled
     "tools": {
         "get_current_session": {
-            "enabled": False,  # Disabled by default
+            "enabled": False,  # DISABLED by default
             "description": "Get information about the current session context"
         },
         "set_session": {
-            "enabled": False,  # Disabled by default
+            "enabled": False,  # DISABLED by default
             "description": "Set the session context for subsequent operations"
         },
         "clear_session": {
-            "enabled": False,  # Disabled by default
+            "enabled": False,  # DISABLED by default
             "description": "Clear the current session context"
         },
         "list_sessions": {
-            "enabled": False,  # Disabled by default
+            "enabled": False,  # DISABLED by default
             "description": "List all active sessions"
         },
         "get_session_info": {
-            "enabled": False,  # Disabled by default
+            "enabled": False,  # DISABLED by default
             "description": "Get detailed information about a specific session"
         },
         "create_session": {
-            "enabled": False,  # Disabled by default
+            "enabled": False,  # DISABLED by default
             "description": "Create a new session with optional metadata"
         }
     }
@@ -69,21 +70,24 @@ def configure_session_tools(config: Dict[str, Any]) -> None:
     _enabled_session_tools.clear()
     
     # Check if session tools are enabled globally
-    if not _session_tools_config.get("enabled", True):
-        logger.info("Session tools disabled in configuration")
+    if not _session_tools_config.get("enabled", False):
+        logger.info("Session tools disabled in configuration - use 'session_tools.enabled: true' to enable")
         return
     
     # Process individual tool configuration
     tools_config = _session_tools_config.get("tools", DEFAULT_SESSION_TOOLS_CONFIG["tools"])
     
     for tool_name, tool_config in tools_config.items():
-        if tool_config.get("enabled", True):
+        if tool_config.get("enabled", False):
             _enabled_session_tools.add(tool_name)
             logger.debug(f"Enabled session tool: {tool_name}")
         else:
-            logger.debug(f"Disabled session tool: {tool_name}")
+            logger.debug(f"Disabled session tool: {tool_name} - use 'session_tools.tools.{tool_name}.enabled: true' to enable")
     
-    logger.info(f"Configured {len(_enabled_session_tools)} session tools: {', '.join(sorted(_enabled_session_tools))}")
+    if _enabled_session_tools:
+        logger.info(f"Configured {len(_enabled_session_tools)} session tools: {', '.join(sorted(_enabled_session_tools))}")
+    else:
+        logger.info("No session tools enabled - all tools require explicit configuration")
 
 
 def is_session_tool_enabled(tool_name: str) -> bool:
@@ -138,11 +142,12 @@ async def set_session_context_tool(session_id: str) -> str:
         ValueError: If the session ID is invalid or cannot be set
     """
     try:
-        normalized_id = normalize_session_id(session_id)
-        set_session_context(normalized_id)
-        return f"Session context set to: {normalized_id}"
-    except SessionError as e:
-        raise ValueError(f"Failed to set session context: {str(e)}")
+        # Basic validation for session ID format
+        if not session_id or not isinstance(session_id, str):
+            raise ValueError("Session ID must be a non-empty string")
+        
+        set_session_context(session_id)
+        return f"Session context set to: {session_id}"
     except Exception as e:
         raise ValueError(f"Failed to set session context: {str(e)}")
 
@@ -171,17 +176,20 @@ async def list_sessions_tool() -> Dict[str, Any]:
     
     Returns:
         Dictionary containing:
-        - sessions: List of active session IDs
+        - sessions: List of active session IDs (limited functionality without session manager)
         - count: Number of active sessions
         - current_session: Current session ID if any
     """
-    sessions = list_sessions()
     current = get_session_context()
+    
+    # Note: Without direct access to session manager, we can only return current session
+    sessions = [current] if current else []
     
     return {
         "sessions": sessions,
         "count": len(sessions),
-        "current_session": current
+        "current_session": current,
+        "note": "Limited to current session context - full session listing requires session manager integration"
     }
 
 
@@ -197,38 +205,31 @@ async def get_session_info_tool(session_id: str) -> Dict[str, Any]:
         Dictionary containing session information and metadata
     """
     try:
-        normalized_id = normalize_session_id(session_id)
+        # Basic validation
+        if not session_id or not isinstance(session_id, str):
+            raise ValueError("Session ID must be a non-empty string")
         
         # Get basic session info
-        is_current = get_session_context() == normalized_id
-        
-        # Try to get some session data (this is a simple example)
-        # In a real implementation, you might have more sophisticated session metadata
-        sessions = list_sessions()
-        exists = normalized_id in sessions
+        current = get_session_context()
+        is_current = current == session_id
         
         result = {
-            "session_id": normalized_id,
-            "exists": exists,
+            "session_id": session_id,
             "is_current": is_current,
-            "status": "active" if exists else "not_found"
+            "status": "active" if is_current else "unknown",
+            "note": "Limited session info available - requires session manager for full details"
         }
         
-        if exists:
-            # Try to get some session metadata
-            try:
-                # This is a simple example - you could extend this to get more session info
-                result["metadata"] = {
-                    "created_via": "mcp_session_tools",
-                    "last_accessed": "unknown"  # Could be enhanced with actual tracking
-                }
-            except Exception:
-                result["metadata"] = {}
+        if is_current:
+            result["metadata"] = {
+                "context_source": "session_context",
+                "tools_used": "session_management_tools"
+            }
         
         return result
         
-    except SessionError as e:
-        raise ValueError(f"Invalid session ID: {str(e)}")
+    except Exception as e:
+        raise ValueError(f"Failed to get session info: {str(e)}")
 
 
 @mcp_tool(name="create_session", description="Create a new session with optional metadata")
@@ -256,33 +257,31 @@ async def create_session_tool(
         session_id = f"session-{timestamp}-{random_suffix}"
     
     try:
-        normalized_id = normalize_session_id(session_id)
+        # Basic validation
+        if not session_id or not isinstance(session_id, str):
+            raise ValueError("Session ID must be a non-empty string")
         
         # Set the session context
-        set_session_context(normalized_id)
-        
-        # Store metadata if provided
-        if metadata:
-            for key, value in metadata.items():
-                set_session_data(normalized_id, key, value)
+        set_session_context(session_id)
         
         # Add creation metadata
         creation_meta = {
             "created_at": time.time(),
-            "created_via": "mcp_session_tools"
+            "created_via": "session_management_tools",
+            "note": "Basic session creation - full functionality requires session manager integration"
         }
         
-        for key, value in creation_meta.items():
-            set_session_data(normalized_id, key, value)
+        if metadata:
+            creation_meta.update(metadata)
         
         return {
-            "session_id": normalized_id,
+            "session_id": session_id,
             "status": "created",
             "is_current": True,
-            "metadata": {**(metadata or {}), **creation_meta}
+            "metadata": creation_meta
         }
         
-    except SessionError as e:
+    except Exception as e:
         raise ValueError(f"Failed to create session: {str(e)}")
 
 
@@ -298,7 +297,7 @@ async def register_session_tools(config: Dict[str, Any] | None = None) -> bool:
       the six helpers are removed from ``TOOLS_REGISTRY`` and the function
       returns ``False``.
     * Otherwise, only the helpers whose own `enabled: true` flag is set are
-      initialised (via `initialize_tool_registry`) and kept in the registry.
+      initialised and kept in the registry.
 
     Returns
     -------
@@ -324,7 +323,7 @@ async def register_session_tools(config: Dict[str, Any] | None = None) -> bool:
     sess_cfg = (config or {}).get("session_tools", {})
     if not sess_cfg.get("enabled", False):
         prune_all()
-        logger.debug("session_tools disabled - nothing registered")
+        logger.info("Session tools disabled - use 'session_tools.enabled: true' in config to enable")
         return False
 
     # Which helpers are individually enabled?
@@ -335,10 +334,10 @@ async def register_session_tools(config: Dict[str, Any] | None = None) -> bool:
     }
     if not enabled_tools:
         prune_all()
-        logger.info("session_tools block present but no helpers enabled")
+        logger.info("Session tools block present but no individual tools enabled - use 'session_tools.tools.<tool_name>.enabled: true' to enable specific tools")
         return False
 
-    # ------------------------------------------------------------------ 2. (re)initialise registry metadata
+    # ------------------------------------------------------------------ 2. initialize registry metadata
     from chuk_mcp_runtime.common.mcp_tool_decorator import initialize_tool_registry
     await initialize_tool_registry()
 
@@ -349,21 +348,25 @@ async def register_session_tools(config: Dict[str, Any] | None = None) -> bool:
     for name in enabled_tools:
         fn = ALL_SESSION_TOOLS[name]
 
-        # If the wrapper is still a placeholder, initialise it now
-        if getattr(fn, "_needs_init", False):
-            from chuk_mcp_runtime.common.mcp_tool_decorator import _initialize_tool
-            await _initialize_tool(name, fn)
-            fn = TOOLS_REGISTRY.get(name, fn)
+        # Ensure tool is properly initialized
+        from chuk_mcp_runtime.common.mcp_tool_decorator import ensure_tool_initialized
+        try:
+            initialized_fn = await ensure_tool_initialized(name)
+            TOOLS_REGISTRY[name] = initialized_fn
+            registered += 1
+            logger.debug("Registered session tool: %s", name)
+        except Exception as e:
+            logger.error("Failed to register session tool %s: %s", name, e)
 
-        TOOLS_REGISTRY[name] = fn
-        registered += 1
-        logger.debug("Registered session tool: %s", name)
-
-    logger.info(
-        "Registered %d session helper(s): %s",
-        registered,
-        ", ".join(sorted(enabled_tools)),
-    )
+    if registered > 0:
+        logger.info(
+            "Registered %d session tool(s): %s",
+            registered,
+            ", ".join(sorted(enabled_tools)),
+        )
+    else:
+        logger.warning("No session tools were successfully registered")
+        
     return bool(registered)
 
 
@@ -374,11 +377,17 @@ def get_session_tools_info() -> Dict[str, Any]:
     return {
         "available": True,  # Session tools are always available
         "configured": bool(_session_tools_config),
+        "enabled_globally": _session_tools_config.get("enabled", False) if _session_tools_config else False,
         "enabled_tools": list(_enabled_session_tools),
         "disabled_tools": [t for t in all_tools if t not in _enabled_session_tools],
         "total_tools": len(all_tools),
         "enabled_count": len(_enabled_session_tools),
-        "config": _session_tools_config
+        "config": _session_tools_config,
+        "default_state": "disabled",
+        "enable_instructions": {
+            "global": "Set 'session_tools.enabled: true' in configuration",
+            "individual": "Set 'session_tools.tools.<tool_name>.enabled: true' for each desired tool"
+        }
     }
 
 

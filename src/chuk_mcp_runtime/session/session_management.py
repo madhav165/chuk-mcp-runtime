@@ -16,6 +16,7 @@ async with SessionContext(session_manager, user_id="alice") as session_id:
 """
 
 # Import everything from the native implementation
+from typing import Optional
 from chuk_mcp_runtime.session.native_session_management import (
     # Core native classes
     MCPSessionManager,
@@ -41,8 +42,52 @@ from chuk_mcp_runtime.session.native_session_management import (
     set_session_context,
     get_session_context,
     clear_session_context,
-    validate_session_parameter,
 )
+
+# Make validate_session_parameter fully async
+async def validate_session_parameter(
+    session_id: Optional[str],
+    operation: str,
+    session_manager: Optional[MCPSessionManager] = None
+) -> str:
+    """
+    Validate and return a session ID, creating one if necessary.
+    
+    Args:
+        session_id: Optional session ID to validate
+        operation: Name of the operation requiring the session (for error messages)
+        session_manager: Optional session manager for auto-creation
+        
+    Returns:
+        Valid session ID
+        
+    Raises:
+        SessionError: If no session can be determined
+        SessionValidationError: If provided session ID is invalid
+    """
+    # If session_id is provided, validate it
+    if session_id:
+        if session_manager and not await session_manager.validate_session(session_id):
+            raise SessionValidationError(f"Invalid session ID for operation '{operation}': {session_id}")
+        return session_id
+    
+    # Try to get from context
+    current = get_session_context()
+    if current:
+        if session_manager and not await session_manager.validate_session(current):
+            # Current session is invalid, clear it
+            clear_session_context()
+        else:
+            return current
+    
+    # Auto-create if session manager is available
+    if session_manager:
+        new_session = await session_manager.auto_create_session_if_needed()
+        return new_session
+    
+    # No session available and can't create one
+    raise SessionError(f"Operation '{operation}' requires valid session_id or session manager")
+
 
 # Re-export everything for clean imports
 __all__ = [
@@ -66,11 +111,13 @@ __all__ = [
     "SessionNotFoundError",
     "SessionValidationError",
     
+    # Fixed session validation
+    "validate_session_parameter",
+    
     # Legacy compatibility
     "set_session_context",
     "get_session_context",
-    "clear_session_context", 
-    "validate_session_parameter",
+    "clear_session_context",
 ]
 
 # Convenience factory function
