@@ -330,7 +330,7 @@ wheels = [
 
 [[package]]
 name = "chuk-artifacts"
-version = "0.4"
+version = "0.4.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aioboto3" },
@@ -342,14 +342,14 @@ dependencies = [
     { name = "pyyaml" },
     { name = "redis" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f5/b0/8ab0f05c09ca9bd600d1eb55e4468e24f7ac2b68c1de7fae02d45587cb41/chuk_artifacts-0.4.tar.gz", hash = "sha256:7833181c7e9902284d2c94bee3c2f6043a64b18c2d51e8cca087b26f6045d184", size = 93677 }
+sdist = { url = "https://files.pythonhosted.org/packages/64/da/577ac92baa94c9cc5a7b20e7adf843ac09a62ef50b6fa280fbf530264678/chuk_artifacts-0.4.1.tar.gz", hash = "sha256:b8ff717312e298e33b29873fede7849fe31f6faf0b497c60b7258ab388569454", size = 93916 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a6/49/4fa5357352416e40ad54b80161849babd1a7335b724b56855920e8afdf16/chuk_artifacts-0.4-py3-none-any.whl", hash = "sha256:469447dd00982f3601149a5d8ab7388f1bebd2a76b848a1cf35552da4a861dd6", size = 42952 },
+    { url = "https://files.pythonhosted.org/packages/a1/3a/93ebe6e2c4edb7b2f91b9998e4e3f174ff7cd4e188c3d6d60a4d548be060/chuk_artifacts-0.4.1-py3-none-any.whl", hash = "sha256:0ee6ea2ab1d64b35a79cfc449ad0b313d1b95e4a8fc16b0cb252ae75185286a4", size = 43172 },
 ]
 
 [[package]]
 name = "chuk-mcp-runtime"
-version = "0.6.2"
+version = "0.6.3"
 source = { editable = "." }
 dependencies = [
     { name = "chuk-artifacts" },
@@ -377,7 +377,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "chuk-artifacts", specifier = ">=0.4" },
+    { name = "chuk-artifacts", specifier = ">=0.4.1" },
     { name = "chuk-sessions", specifier = ">=0.4.2" },
     { name = "cryptography", specifier = ">=44.0.3" },
     { name = "mcp", specifier = ">=1.9.4" },
